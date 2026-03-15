@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
+use std::collections::HashSet;
+
 use amos::adapter::AdapterRegistry;
 use amos::adapter_pull::{self, TrustConfig};
 use amos::cli::{Cli, Command};
@@ -64,6 +66,22 @@ fn main() -> Result<()> {
     // Build adapter registry
     let registry = build_registry(&scan_root, &nodes);
 
+    // Handle commands that need the DAG
+    let mut dag = Dag::build(nodes.clone()).context("building DAG")?;
+    let statuses = status::read_status_file(&scan_root);
+    dag.apply_status_overlay(statuses);
+
+    // Handle prune command
+    if matches!(&cli.command, Some(Command::Prune)) {
+        return handle_prune(&dag, &scan_root);
+    }
+
+    // Handle graph command
+    if matches!(&cli.command, Some(Command::Graph)) {
+        print!("{}", output::format_graph(&dag));
+        return Ok(());
+    }
+
     // Handle sync command
     if matches!(&cli.command, Some(Command::Sync)) {
         let uri_nodes: Vec<&str> = nodes
@@ -100,15 +118,84 @@ fn main() -> Result<()> {
     }
 
     // Default: dump the DAG
-    let mut dag = Dag::build(nodes).context("building DAG")?;
-
-    let statuses = status::read_status_file(&scan_root);
-    dag.apply_status_overlay(statuses);
-
     eprintln!("amos: {} nodes", dag.all_nodes().len());
     print!("{}", output::format_dag(&dag, &registry));
 
     Ok(())
+}
+
+use amos::dag::ComputedStatus;
+
+/// Prune done nodes that aren't upstream of any ready/in-progress work.
+fn handle_prune(dag: &Dag, scan_root: &std::path::Path) -> Result<()> {
+    // Find all ready/in-progress nodes
+    let active_nodes: Vec<&str> = dag
+        .all_nodes()
+        .iter()
+        .filter(|n| {
+            matches!(
+                dag.compute_status(&n.name),
+                Some(ComputedStatus::Ready) | Some(ComputedStatus::InProgress)
+            )
+        })
+        .map(|n| n.name.as_str())
+        .collect();
+
+    // Collect all nodes that are transitively upstream of active nodes
+    let mut needed: HashSet<String> = HashSet::new();
+    for name in &active_nodes {
+        needed.insert(name.to_string());
+        collect_upstream(dag, name, &mut needed);
+    }
+
+    // Also keep blocked nodes (they have pending work)
+    for node in dag.all_nodes() {
+        if matches!(
+            dag.compute_status(&node.name),
+            Some(ComputedStatus::Blocked) | Some(ComputedStatus::InProgress) | Some(ComputedStatus::Ready)
+        ) {
+            needed.insert(node.name.clone());
+        }
+    }
+
+    // Find done nodes that aren't needed
+    let all_nodes = dag.all_nodes();
+    let prunable: Vec<_> = all_nodes
+        .iter()
+        .filter(|n| {
+            dag.compute_status(&n.name) == Some(ComputedStatus::Done) && !needed.contains(&n.name)
+        })
+        .collect();
+
+    if prunable.is_empty() {
+        eprintln!("amos: nothing to prune");
+        return Ok(());
+    }
+
+    for node in &prunable {
+        // Delete the source file
+        if node.source_file.exists() {
+            std::fs::remove_file(&node.source_file).with_context(|| {
+                format!("deleting {}", node.source_file.display())
+            })?;
+            eprintln!("pruned: {} ({})", node.name, node.source_file.display());
+        }
+
+        // Remove from .amos-status
+        let _ = status::clear_status(scan_root, &node.name);
+    }
+
+    eprintln!("amos: pruned {} node(s)", prunable.len());
+    Ok(())
+}
+
+/// Recursively collect all upstream nodes.
+fn collect_upstream(dag: &Dag, name: &str, visited: &mut HashSet<String>) {
+    for upstream in dag.upstream_of(name) {
+        if visited.insert(upstream.name.clone()) {
+            collect_upstream(dag, &upstream.name, visited);
+        }
+    }
 }
 
 /// Build the adapter registry.

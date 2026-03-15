@@ -35,4 +35,8 @@ pub enum Command {
     },
     /// Sync status from external adapters (resolves URIs in node names)
     Sync,
+    /// Remove done nodes that aren't needed by active work
+    Prune,
+    /// Print the DAG as an ASCII dependency tree
+    Graph,
 }

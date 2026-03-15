@@ -160,3 +160,105 @@ fn format_context_ref(ctx: &crate::parser::ContextRef) -> String {
         crate::parser::ContextRef::Url(url) => format!("@url:{}", url),
     }
 }
+
+/// Format the DAG as an ASCII dependency tree.
+pub fn format_graph(dag: &Dag) -> String {
+    let mut out = String::new();
+
+    let nodes = dag.all_nodes();
+    if nodes.is_empty() {
+        return out;
+    }
+
+    // Find root nodes (no upstream dependencies, or upstream not in the DAG)
+    let mut roots: Vec<&crate::parser::Node> = nodes
+        .iter()
+        .filter(|n| dag.upstream_of(&n.name).is_empty())
+        .copied()
+        .collect();
+    roots.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Track what we've printed to avoid duplicates in diamond shapes
+    let mut printed = std::collections::HashSet::new();
+
+    for root in &roots {
+        format_tree_node(&mut out, dag, &root.name, "", true, &mut printed);
+    }
+
+    out
+}
+
+fn format_tree_node(
+    out: &mut String,
+    dag: &Dag,
+    name: &str,
+    prefix: &str,
+    is_last: bool,
+    printed: &mut std::collections::HashSet<String>,
+) {
+    let connector = if prefix.is_empty() {
+        ""
+    } else if is_last {
+        "└── "
+    } else {
+        "├── "
+    };
+
+    let status = dag
+        .compute_status(name)
+        .unwrap_or(ComputedStatus::Blocked);
+
+    let status_marker = match status {
+        ComputedStatus::Done => "✓",
+        ComputedStatus::InProgress => "~",
+        ComputedStatus::Ready => "●",
+        ComputedStatus::Blocked => "○",
+    };
+
+    let desc = dag
+        .get_node(name)
+        .and_then(|n| n.description.as_deref())
+        .unwrap_or("");
+
+    let display = shorten_name(name);
+
+    // If already printed (diamond merge), show a back-reference
+    if !printed.insert(name.to_string()) {
+        out.push_str(&format!(
+            "{}{}{} {} (→ see above)\n",
+            prefix, connector, status_marker, display
+        ));
+        return;
+    }
+
+    out.push_str(&format!(
+        "{}{}{} {} {}\n",
+        prefix, connector, status_marker, display, desc
+    ));
+
+    let mut children: Vec<_> = dag.downstream_of(name);
+    children.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let child_prefix = if prefix.is_empty() {
+        "    ".to_string()
+    } else if is_last {
+        format!("{}    ", prefix)
+    } else {
+        format!("{}│   ", prefix)
+    };
+
+    for (i, child) in children.iter().enumerate() {
+        let last = i == children.len() - 1;
+        format_tree_node(out, dag, &child.name, &child_prefix, last, printed);
+    }
+}
+
+/// Shorten @github:owner/repo#N to #N for cleaner tree display.
+fn shorten_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("@github:") {
+        if let Some((_repo, number)) = rest.split_once('#') {
+            return format!("#{}", number);
+        }
+    }
+    name.to_string()
+}
