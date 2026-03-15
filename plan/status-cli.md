@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: status-cli
+name: gh:8
 description: CLI subcommands to mutate status — amos done, amos start, amos reset
 dependencies:
-  - up:status-file
-  - down:adapter-framework
+  - up:gh:4
+  - down:gh:12
 ---
 
 Add subcommands to `cli.rs`:

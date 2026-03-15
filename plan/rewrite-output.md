@@ -1,11 +1,10 @@
 ---
 whoami: amos
-name: rewrite-output
+name: gh:5
 description: New output formatter — structured DAG dump, not a prompt
 dependencies:
-  - up:gut-claude-pipeline
-  - down:update-spec-docs
-
+  - up:gh:3
+  - down:gh:10
 ---
 
 New `output.rs` prints the DAG state to stdout. Compact for done/blocked nodes, expanded with full body for ready/in-progress nodes.

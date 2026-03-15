@@ -1,12 +1,11 @@
 ---
 whoami: amos
-name: update-spec-docs
+name: gh:10
 description: Update spec and skill docs to reflect amos as a pure data tool
 dependencies:
-  - up:strip-tags
-  - up:rewrite-output
-  - up:simplify-cli
-
+  - up:gh:1
+  - up:gh:5
+  - up:gh:6
 ---
 
 Rewrite `spec/SPEC.md`:

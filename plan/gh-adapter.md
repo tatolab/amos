@@ -1,9 +1,9 @@
 ---
 whoami: amos
-name: gh-adapter
+name: gh:13
 description: GitHub adapter — sync node status from GitHub issues via gh CLI
 dependencies:
-  - up:adapter-framework
+  - up:gh:12
 ---
 
 First adapter implementation. Uses `gh` CLI (assumes installed and authed).

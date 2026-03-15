@@ -1,11 +1,10 @@
 ---
 whoami: amos
-name: gut-claude-pipeline
+name: gh:3
 description: Remove all Claude API calls — amos is a data tool, not an AI orchestrator
 dependencies:
-  - down:rewrite-output
-  - down:simplify-cli
-
+  - down:gh:5
+  - down:gh:6
 ---
 
 Delete from `output.rs`:

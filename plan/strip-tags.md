@@ -1,10 +1,9 @@
 ---
 whoami: amos
-name: strip-tags
+name: gh:1
 description: Remove the tags field from the amos schema — parsed but never used
 dependencies:
-  - down:update-spec-docs
-
+  - down:gh:10
 ---
 
 Tags are declared in the spec, parsed in `parser.rs`, echoed in `output.rs`, but nothing filters, groups, or queries by them. Dead weight.

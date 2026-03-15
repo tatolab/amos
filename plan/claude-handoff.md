@@ -1,9 +1,9 @@
 ---
 whoami: amos
-name: claude-handoff
+name: gh:11
 description: Pipe amos output directly into claude code as a system prompt
 dependencies:
-  - up:run-from-root
+  - up:gh:7
 ---
 
 The end goal: `amos` builds the spec, then passes it to `claude` as context so you can start working immediately. Right now the spec goes to stdout and you have to copy-paste it.

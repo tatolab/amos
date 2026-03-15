@@ -1,11 +1,11 @@
 ---
 whoami: amos
-name: adapter-framework
+name: gh:12
 description: Adapter trait and config system for syncing status from external systems
 dependencies:
-  - up:status-cli
-  - up:remove-frontmatter-status
-  - down:gh-adapter
+  - up:gh:8
+  - up:gh:9
+  - down:gh:13
 ---
 
 Add `.amosrc.toml` support at the scan root. Minimal config:

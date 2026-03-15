@@ -1,8 +1,7 @@
 ---
 whoami: amos
-name: fix-cycle-status
+name: gh:2
 description: Fix stack overflow when computing status on cyclic graphs
-
 ---
 
 `Dag::compute_status_for_index` recurses into upstream nodes without tracking visited nodes. If the graph has a cycle, this blows the stack.
