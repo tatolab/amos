@@ -1,16 +1,11 @@
 ---
 whoami: amos
 name: "@github:tatolab/amos#11"
-description: Pipe amos output directly into claude code as a system prompt
+description: Claude Code integration — connecting amos output to a claude session
 dependencies:
   - "up:@github:tatolab/amos#7"
 ---
 
-The end goal: `amos` builds the spec, then passes it to `claude` as context so you can start working immediately. Right now the spec goes to stdout and you have to copy-paste it.
+@github:tatolab/amos#11
 
-Options to explore:
-- `amos | claude -p` — simplest, pipe stdout into claude's prompt mode
-- `amos --exec` — amos invokes `claude` itself with the spec as a system message
-- `amos --print` — just print the spec (current behavior), for when you want to review before handing off
-
-The default should be the most useful flow: scan, build spec, hand off to claude. The spec becomes claude's working context for the session.
+Don't add an --exec flag yet. Focus on making `amos | claude -p` work cleanly first. The output format is already markdown that Claude reads natively.
