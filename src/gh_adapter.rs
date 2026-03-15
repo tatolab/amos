@@ -213,6 +213,33 @@ impl Adapter for GhAdapter {
         })
     }
 
+    fn notify(&self, reference: &str, message: &str) -> Result<()> {
+        // Only issue references, not file references
+        if reference.contains('/') && !reference.contains('#') {
+            return Ok(());
+        }
+
+        let (repo, number) = self.parse_ref(reference)?;
+        let repo_str = repo.as_deref().unwrap_or("");
+
+        let mut cmd = Command::new("gh");
+        cmd.args(["issue", "comment", &number.to_string()]);
+        cmd.args(["--body", message]);
+        if !repo_str.is_empty() {
+            cmd.args(["--repo", repo_str]);
+        }
+
+        let output = cmd.output().context("failed to comment on issue")?;
+        if output.status.success() {
+            eprintln!("amos: commented on {}#{}", repo_str, number);
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("amos: failed to comment on {}#{}: {}", repo_str, number, stderr.trim());
+        }
+
+        Ok(())
+    }
+
     fn resolve_batch(&self, references: &[&str]) -> Result<HashMap<String, ResourceFields>> {
         let mut by_repo: HashMap<Option<String>, Vec<(String, u64)>> = HashMap::new();
         for &reference in references {

@@ -18,20 +18,12 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Mark a node as done
-    Done {
-        /// Node name
+    /// Send a message to a node's source adapter (comment, log, status update)
+    Notify {
+        /// Node name or URI (e.g. @github:tatolab/amos#22)
         node: String,
-    },
-    /// Mark a node as in-progress
-    Start {
-        /// Node name
-        node: String,
-    },
-    /// Clear a node's status
-    Reset {
-        /// Node name
-        node: String,
+        /// Freeform message — the adapter decides how to record it
+        message: String,
     },
     /// Sync status from external adapters (resolves URIs in node names)
     Sync,

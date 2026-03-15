@@ -29,27 +29,11 @@ fn main() -> Result<()> {
         .canonicalize()
         .with_context(|| format!("resolving scan root: {}", scan_root.display()))?;
 
-    // Handle status mutation commands (no scan needed)
-    match &cli.command {
-        Some(Command::Done { node }) => {
-            status::write_status(&scan_root, node, ManualStatus::Done)
-                .with_context(|| format!("marking {} done", node))?;
-            eprintln!("[x] {}", node);
-            return Ok(());
-        }
-        Some(Command::Start { node }) => {
-            status::write_status(&scan_root, node, ManualStatus::InProgress)
-                .with_context(|| format!("starting {}", node))?;
-            eprintln!("[~] {}", node);
-            return Ok(());
-        }
-        Some(Command::Reset { node }) => {
-            status::clear_status(&scan_root, node)
-                .with_context(|| format!("resetting {}", node))?;
-            eprintln!("[ ] {}", node);
-            return Ok(());
-        }
-        _ => {}
+    // Handle notify command (no scan needed)
+    if let Some(Command::Notify { node, message }) = &cli.command {
+        let registry = build_registry_minimal(&scan_root);
+        registry.notify(node, message);
+        return Ok(());
     }
 
     // Scan + parse (needed for sync and default dump)
@@ -242,5 +226,16 @@ fn build_registry(scan_root: &std::path::Path, nodes: &[amos::parser::Node]) -> 
         }
     }
 
+    registry
+}
+
+/// Build a minimal registry with just built-in adapters.
+/// Used for status notifications where we don't need to scan/parse nodes.
+fn build_registry_minimal(scan_root: &std::path::Path) -> AdapterRegistry {
+    let mut registry = AdapterRegistry::new();
+    registry.register(Box::new(FileAdapter::new(scan_root)));
+    registry.register(Box::new(GhAdapter::new(None)));
+    registry.register(Box::new(UrlAdapter::new()));
+    registry.register(Box::new(FfmpegAdapter::new(scan_root)));
     registry
 }

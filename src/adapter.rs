@@ -38,6 +38,13 @@ pub trait Adapter: Send + Sync {
         }
         Ok(results)
     }
+
+    /// Send a message to the external system for this node.
+    /// The adapter decides how to record it — comment, log, status update, etc.
+    /// Default is a no-op — adapters that support write-back override this.
+    fn notify(&self, _reference: &str, _message: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Registry of adapters keyed by URI scheme.
@@ -56,6 +63,20 @@ impl AdapterRegistry {
     pub fn register(&mut self, adapter: Box<dyn Adapter>) {
         let scheme = adapter.scheme().to_string();
         self.adapters.insert(scheme, adapter);
+    }
+
+    /// Send a message to the adapter that owns a URI.
+    /// Best-effort — logs failures but doesn't propagate errors.
+    pub fn notify(&self, uri: &str, message: &str) {
+        let Some((scheme, reference)) = self.parse_uri(uri) else {
+            return;
+        };
+        let Some(adapter) = self.adapters.get(scheme) else {
+            return;
+        };
+        if let Err(e) = adapter.notify(reference, message) {
+            eprintln!("amos: notify failed for {}: {}", uri, e);
+        }
     }
 
     /// Check if a string looks like a URI with a registered scheme.
