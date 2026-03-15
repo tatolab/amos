@@ -316,10 +316,12 @@ fn executable_command(path: &Path) -> String {
 
     match ext {
         "py" => format!("python3 {}", path_str),
-        "js" => format!("node {}", path_str),
+        "js" | "mjs" => format!("node {}", path_str),
         "ts" => format!("npx tsx {}", path_str),
-        "sh" | "bash" => format!("bash {}", path_str),
-        _ => path_str.to_string(), // Assume executable directly
+        "rb" => format!("ruby {}", path_str),
+        "sh" | "bash" | "zsh" => format!("bash {}", path_str),
+        "pl" => format!("perl {}", path_str),
+        _ => path_str.to_string(), // Binary or shebang — run directly
     }
 }
 
