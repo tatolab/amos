@@ -111,35 +111,34 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build the adapter registry with built-in + auto-pulled + config adapters.
+/// Build the adapter registry.
+///
+/// Priority (last wins): built-in → auto-pulled from frontmatter → .amosrc.toml
+/// This means frontmatter can override built-ins, and .amosrc.toml overrides everything.
 fn build_registry(scan_root: &std::path::Path, nodes: &[amos::parser::Node]) -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
 
-    let builtin_schemes = ["file", "github", "url", "ffmpeg"];
-
-    // Built-in adapters (always available)
+    // 1. Built-in adapters (defaults, can be overridden)
     registry.register(Box::new(FileAdapter::new(scan_root)));
     registry.register(Box::new(GhAdapter::new(None)));
     registry.register(Box::new(UrlAdapter::new()));
     registry.register(Box::new(FfmpegAdapter::new(scan_root)));
 
-    // Auto-pull adapters declared in node frontmatter
+    // 2. Auto-pull adapters from frontmatter declarations
+    //    "builtin" sources are skipped. Custom sources override built-ins.
     let trust = TrustConfig::load(scan_root);
-    let pulled = adapter_pull::build_declared_adapters(nodes, &trust, &builtin_schemes);
+    let pulled = adapter_pull::build_declared_adapters(nodes, &trust);
     for (_scheme, adapter) in pulled {
         registry.register(Box::new(adapter));
     }
 
-    // External adapters from .amosrc.toml [adapters] section (command-based)
+    // 3. Local config overrides (.amosrc.toml [adapters] section)
     let config_path = scan_root.join(".amosrc.toml");
     if config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
             if let Ok(config) = content.parse::<toml::Table>() {
                 if let Some(adapters) = config.get("adapters").and_then(|v| v.as_table()) {
                     for (scheme, settings) in adapters {
-                        if builtin_schemes.contains(&scheme.as_str()) {
-                            continue;
-                        }
                         if let Some(command) = settings.get("command").and_then(|v| v.as_str()) {
                             eprintln!("amos: registered external adapter '{}' → {}", scheme, command);
                             registry.register(Box::new(amos::external_adapter::ExternalAdapter::new(scheme, command)));

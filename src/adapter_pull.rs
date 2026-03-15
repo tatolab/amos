@@ -262,17 +262,20 @@ fn find_executable(dir: &Path, original_path: &str) -> Result<PathBuf> {
 
 /// Build external adapters from node declarations, respecting trust config.
 /// Returns a list of (scheme, ExternalAdapter) pairs ready to register.
+///
+/// - `builtin` source = skip (use the built-in adapter)
+/// - `@github:...` source on a built-in scheme = override (custom adapter replaces built-in)
+/// - `@github:...` source on a new scheme = pull and register
 pub fn build_declared_adapters(
     nodes: &[Node],
     trust: &TrustConfig,
-    builtin_schemes: &[&str],
 ) -> Vec<(String, ExternalAdapter)> {
     let declarations = collect_adapter_declarations(nodes);
     let mut adapters = Vec::new();
 
     for (scheme, source) in declarations {
-        // Skip built-in schemes
-        if builtin_schemes.contains(&scheme.as_str()) {
+        // "builtin" means use the built-in — nothing to pull
+        if source == "builtin" {
             continue;
         }
 
