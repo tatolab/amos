@@ -1,0 +1,11 @@
+- [x] strip-tags
+- [x] fix-cycle-status
+- [x] gut-claude-pipeline
+- [x] rewrite-output
+- [x] simplify-cli
+- [x] run-from-root
+- [x] update-spec-docs
+- [x] status-file
+- [x] status-cli
+- [x] remove-frontmatter-status
+- [x] adapter-framework

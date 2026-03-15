@@ -1,0 +1,18 @@
+---
+whoami: amos
+name: run-from-root
+description: Make amos runnable from the project root with no arguments
+dependencies:
+  - up:fix-cycle-status
+  - down:claude-handoff
+
+---
+
+Right now `amos` requires a prompt argument. The common case is: you're in a project directory with amos files, you want to see what's ready and hand the whole thing off to claude.
+
+Changes to `cli.rs` and `main.rs`:
+- Make `PROMPT` optional — if absent, default to something like "summarize the work stream and identify what's ready"
+- Scan cwd by default (already works)
+- Print the DAG summary to stderr so you can see what amos found before claude runs
+
+Done: prompt arg removed, cwd scan is the default.
