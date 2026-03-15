@@ -1,7 +1,7 @@
 ---
 whoami: amos
 name: "@github:tatolab/amos#11"
-description: Claude Code integration — connecting amos output to a claude session
+description: Output piping — making amos composable with downstream tools and agents
 dependencies:
   - "up:@github:tatolab/amos#7"
 ---
