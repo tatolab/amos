@@ -69,17 +69,20 @@ impl ExternalAdapter {
     }
 
     /// Check if the adapter is authenticated.
-    pub fn is_authenticated(&self) -> bool {
+    /// Returns None if the adapter doesn't support auth (no auth needed).
+    pub fn check_auth(&self) -> Option<bool> {
         let result = self.run_command(&["auth-status"]);
         match result {
             Ok(stdout) => {
                 if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&stdout) {
-                    json["authenticated"].as_bool().unwrap_or(false)
+                    Some(json["authenticated"].as_bool().unwrap_or(true))
                 } else {
-                    false
+                    // Returned something but not valid JSON — assume no auth needed
+                    None
                 }
             }
-            Err(_) => false,
+            // Command failed — adapter doesn't implement auth-status, no auth needed
+            Err(_) => None,
         }
     }
 
@@ -111,22 +114,28 @@ impl ExternalAdapter {
     }
 
     /// Ensure the adapter is authenticated, running auth flow if needed.
+    /// If the adapter doesn't support auth, this is a no-op.
     pub fn ensure_authenticated(&self) -> Result<()> {
-        if !self.is_authenticated() {
-            eprintln!(
-                "amos: adapter '{}' requires authentication",
-                self.uri_scheme
-            );
-            self.authenticate()?;
-
-            if !self.is_authenticated() {
-                bail!(
-                    "adapter '{}' still not authenticated after auth flow",
+        match self.check_auth() {
+            Some(true) => Ok(()),  // Already authed
+            Some(false) => {
+                // Needs auth
+                eprintln!(
+                    "amos: adapter '{}' requires authentication",
                     self.uri_scheme
                 );
+                self.authenticate()?;
+
+                if self.check_auth() == Some(false) {
+                    bail!(
+                        "adapter '{}' still not authenticated after auth flow",
+                        self.uri_scheme
+                    );
+                }
+                Ok(())
             }
+            None => Ok(()),  // No auth support — adapter doesn't need it
         }
-        Ok(())
     }
 }
 
