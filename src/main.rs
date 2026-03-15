@@ -129,7 +129,7 @@ fn build_registry(scan_root: &std::path::Path) -> AdapterRegistry {
                 if let Some(adapters) = config.get("adapters").and_then(|v| v.as_table()) {
                     for (scheme, settings) in adapters {
                         // Skip built-in schemes
-                        if ["file", "gh", "url", "ffmpeg"].contains(&scheme.as_str()) {
+                        if ["file", "github", "url", "ffmpeg"].contains(&scheme.as_str()) {
                             continue;
                         }
                         if let Some(command) = settings.get("command").and_then(|v| v.as_str()) {

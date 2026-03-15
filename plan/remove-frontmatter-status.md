@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: "gh:9"
+name: "@github:tatolab/amos#9"
 description: Remove status field from frontmatter parsing — status lives in .amos-status only
 dependencies:
-  - "up:gh:4"
-  - "down:gh:12"
+  - "up:@github:tatolab/amos#4"
+  - "down:@github:tatolab/amos#12"
 ---
 
 Strip `status` from `RawFrontmatter` and `Node` in `parser.rs`. Node files are immutable specs — you don't edit them to track progress.

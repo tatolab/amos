@@ -1,13 +1,13 @@
 ---
 whoami: amos
-name: "gh:14"
+name: "@github:tatolab/amos#14"
 description: Lazy body resolution with @reference syntax
 dependencies:
-  - "up:gh:13"
-  - "down:gh:15"
+  - "up:@github:tatolab/amos#13"
+  - "down:@github:tatolab/amos#15"
 ---
 
-@gh:tatolab/amos#14
+@github:tatolab/amos#14
 
 Node bodies contain local agent instructions mixed with `@scheme:reference` lines. References resolve lazily — only when a node is expanded (ready/in-progress in the output).
 

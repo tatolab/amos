@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: "gh:6"
+name: "@github:tatolab/amos#6"
 description: Strip CLI to just amos [--dir path] — no prompt arg
 dependencies:
-  - "up:gh:3"
-  - "down:gh:10"
+  - "up:@github:tatolab/amos#3"
+  - "down:@github:tatolab/amos#10"
 ---
 
 Remove the prompt argument entirely. Amos is not a conversational tool — it scans and dumps.

@@ -5,7 +5,7 @@ use crate::status::ManualStatus;
 
 /// Resolved fields from an adapter. Each field is optional —
 /// the adapter returns whatever it can resolve for the given URI.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ResourceFields {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -74,30 +74,36 @@ impl AdapterRegistry {
 
     /// Collect all resolvable URIs from a list, batch-resolve per adapter.
     pub fn resolve_batch(&self, uris: &[&str]) -> Result<HashMap<String, ResourceFields>> {
-        // Group URIs by scheme
-        let mut by_scheme: HashMap<&str, Vec<&str>> = HashMap::new();
+        // Group URIs by scheme, remembering the original URI string for re-keying
+        let mut by_scheme: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
         for uri in uris {
             if let Some((scheme, reference)) = self.parse_uri(uri) {
                 if self.adapters.contains_key(scheme) {
-                    by_scheme.entry(scheme).or_default().push(reference);
+                    by_scheme.entry(scheme).or_default().push((uri, reference));
                 }
             }
         }
 
         let mut all_results = HashMap::new();
-        for (scheme, references) in by_scheme {
+        for (scheme, entries) in by_scheme {
+            let references: Vec<&str> = entries.iter().map(|(_, r)| *r).collect();
             let adapter = &self.adapters[scheme];
             let results = adapter.resolve_batch(&references)?;
-            // Re-key with full URI
-            for (reference, fields) in results {
-                all_results.insert(format!("{}:{}", scheme, reference), fields);
+            // Re-key with original URI (preserves @prefix)
+            for (original_uri, reference) in &entries {
+                if let Some(fields) = results.get(*reference) {
+                    all_results.insert(original_uri.to_string(), fields.clone());
+                }
             }
         }
         Ok(all_results)
     }
 
     /// Parse a string into (scheme, reference) if it looks like a URI.
+    /// Handles both `scheme:reference` and `@scheme:reference` formats.
     fn parse_uri<'a>(&self, value: &'a str) -> Option<(&'a str, &'a str)> {
+        // Strip leading @ if present
+        let value = value.strip_prefix('@').unwrap_or(value);
         let (scheme, reference) = value.split_once(':')?;
         // Scheme must be non-empty, alphanumeric, no spaces
         if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -137,11 +143,13 @@ mod tests {
         let mut registry = AdapterRegistry::new();
         registry.register(Box::new(MockAdapter));
 
+        // Both @-prefixed and plain work
+        assert!(registry.is_resolvable("@mock:something"));
         assert!(registry.is_resolvable("mock:something"));
-        assert!(!registry.is_resolvable("unknown:something"));
+        assert!(!registry.is_resolvable("@unknown:something"));
         assert!(!registry.is_resolvable("plain-name"));
 
-        let fields = registry.resolve("mock:issue-42").unwrap().unwrap();
+        let fields = registry.resolve("@mock:issue-42").unwrap().unwrap();
         assert_eq!(fields.name.as_deref(), Some("Mock: issue-42"));
         assert_eq!(fields.status, Some(ManualStatus::Done));
     }
@@ -150,10 +158,11 @@ mod tests {
     fn test_parse_uri_edge_cases() {
         let registry = AdapterRegistry::new();
 
-        // Valid URIs
-        assert!(registry.parse_uri("gh:15").is_some());
+        // Valid URIs — with and without @
+        assert!(registry.parse_uri("@github:tatolab/amos#15").is_some());
+        assert!(registry.parse_uri("github:tatolab/amos#15").is_some());
+        assert!(registry.parse_uri("@file:src/main.rs").is_some());
         assert!(registry.parse_uri("jira:PROJ-42").is_some());
-        assert!(registry.parse_uri("gh:tatolab/amos#15").is_some());
 
         // Invalid — no colon
         assert!(registry.parse_uri("plain-name").is_none());
@@ -173,11 +182,11 @@ mod tests {
         let mut registry = AdapterRegistry::new();
         registry.register(Box::new(MockAdapter));
 
-        let uris = vec!["mock:a", "mock:b", "unknown:c", "plain"];
+        let uris = vec!["@mock:a", "@mock:b", "@unknown:c", "plain"];
         let results = registry.resolve_batch(&uris).unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.contains_key("mock:a"));
-        assert!(results.contains_key("mock:b"));
+        assert!(results.contains_key("@mock:a"));
+        assert!(results.contains_key("@mock:b"));
     }
 }

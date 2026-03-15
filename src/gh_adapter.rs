@@ -185,7 +185,7 @@ impl IssueData {
 
 impl Adapter for GhAdapter {
     fn scheme(&self) -> &str {
-        "gh"
+        "github"
     }
 
     fn resolve(&self, reference: &str) -> Result<ResourceFields> {

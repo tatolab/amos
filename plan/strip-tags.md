@@ -1,9 +1,9 @@
 ---
 whoami: amos
-name: "gh:1"
+name: "@github:tatolab/amos#1"
 description: Remove the tags field from the amos schema — parsed but never used
 dependencies:
-  - "down:gh:10"
+  - "down:@github:tatolab/amos#10"
 ---
 
 Tags are declared in the spec, parsed in `parser.rs`, echoed in `output.rs`, but nothing filters, groups, or queries by them. Dead weight.

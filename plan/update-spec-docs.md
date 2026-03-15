@@ -1,11 +1,11 @@
 ---
 whoami: amos
-name: "gh:10"
+name: "@github:tatolab/amos#10"
 description: Update spec and skill docs to reflect amos as a pure data tool
 dependencies:
-  - "up:gh:1"
-  - "up:gh:5"
-  - "up:gh:6"
+  - "up:@github:tatolab/amos#1"
+  - "up:@github:tatolab/amos#5"
+  - "up:@github:tatolab/amos#6"
 ---
 
 Rewrite `spec/SPEC.md`:

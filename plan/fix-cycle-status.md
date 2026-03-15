@@ -1,6 +1,6 @@
 ---
 whoami: amos
-name: "gh:2"
+name: "@github:tatolab/amos#2"
 description: Fix stack overflow when computing status on cyclic graphs
 ---
 

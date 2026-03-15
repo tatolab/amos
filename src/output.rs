@@ -29,7 +29,8 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
             .unwrap_or(ComputedStatus::Blocked);
         let desc = node.description.as_deref().unwrap_or("");
 
-        out.push_str(&format!("- **{}** [{}]", node.name, status));
+        let display_name = linkify_name(&node.name);
+        out.push_str(&format!("- **{}** [{}]", display_name, status));
         if !desc.is_empty() {
             out.push_str(&format!(" — {}", desc));
         }
@@ -105,7 +106,8 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
 
         for node in &actionable {
             let status = dag.compute_status(&node.name).unwrap();
-            out.push_str(&format!("\n### {} [{}]\n", node.name, status));
+            let display_name = linkify_name(&node.name);
+            out.push_str(&format!("\n### {} [{}]\n", display_name, status));
 
             if let Some(desc) = &node.description {
                 out.push_str(&format!("\n{}\n", desc));
@@ -127,6 +129,20 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     }
 
     out
+}
+
+/// Convert `@github:owner/repo#N` names into markdown links.
+/// Other names pass through as-is.
+fn linkify_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("@github:") {
+        if let Some((repo, number)) = rest.split_once('#') {
+            return format!(
+                "[@github:{}#{}](https://github.com/{}/issues/{})",
+                repo, number, repo, number
+            );
+        }
+    }
+    name.to_string()
 }
 
 fn format_context_ref(ctx: &crate::parser::ContextRef) -> String {

@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: "gh:3"
+name: "@github:tatolab/amos#3"
 description: Remove all Claude API calls — amos is a data tool, not an AI orchestrator
 dependencies:
-  - "down:gh:5"
-  - "down:gh:6"
+  - "down:@github:tatolab/amos#5"
+  - "down:@github:tatolab/amos#6"
 ---
 
 Delete from `output.rs`:
