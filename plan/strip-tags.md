@@ -1,9 +1,9 @@
 ---
 whoami: amos
-name: gh:1
+name: "gh:1"
 description: Remove the tags field from the amos schema — parsed but never used
 dependencies:
-  - down:gh:10
+  - "down:gh:10"
 ---
 
 Tags are declared in the spec, parsed in `parser.rs`, echoed in `output.rs`, but nothing filters, groups, or queries by them. Dead weight.

@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: gh:4
+name: "gh:4"
 description: Decouple status from frontmatter — store state in .amos-status file
 dependencies:
-  - down:gh:8
-  - down:gh:9
+  - "down:gh:8"
+  - "down:gh:9"
 ---
 
 Add `src/status.rs` that reads/writes `.amos-status` at the scan root.

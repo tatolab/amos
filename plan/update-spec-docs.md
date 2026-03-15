@@ -1,11 +1,11 @@
 ---
 whoami: amos
-name: gh:10
+name: "gh:10"
 description: Update spec and skill docs to reflect amos as a pure data tool
 dependencies:
-  - up:gh:1
-  - up:gh:5
-  - up:gh:6
+  - "up:gh:1"
+  - "up:gh:5"
+  - "up:gh:6"
 ---
 
 Rewrite `spec/SPEC.md`:

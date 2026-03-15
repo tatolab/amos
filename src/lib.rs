@@ -1,7 +1,10 @@
 pub mod adapter;
 pub mod cli;
 pub mod dag;
+pub mod file_adapter;
+pub mod gh_adapter;
 pub mod output;
 pub mod parser;
+pub mod resolver;
 pub mod scanner;
 pub mod status;

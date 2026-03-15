@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: gh:7
+name: "gh:7"
 description: Make amos runnable from the project root with no arguments
 dependencies:
-  - up:gh:2
-  - down:gh:11
+  - "up:gh:2"
+  - "down:gh:11"
 ---
 
 Right now `amos` requires a prompt argument. The common case is: you're in a project directory with amos files, you want to see what's ready and hand the whole thing off to claude.

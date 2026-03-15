@@ -1,10 +1,10 @@
 ---
 whoami: amos
-name: gh:5
+name: "gh:5"
 description: New output formatter — structured DAG dump, not a prompt
 dependencies:
-  - up:gh:3
-  - down:gh:10
+  - "up:gh:3"
+  - "down:gh:10"
 ---
 
 New `output.rs` prints the DAG state to stdout. Compact for done/blocked nodes, expanded with full body for ready/in-progress nodes.

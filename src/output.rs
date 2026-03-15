@@ -1,8 +1,11 @@
+use crate::adapter::AdapterRegistry;
 use crate::dag::{ComputedStatus, Dag};
+use crate::resolver;
 
 /// Format the full DAG state as structured, readable output.
 /// Compact lines for done/blocked nodes, expanded with body for ready/in-progress.
-pub fn format_dag(dag: &Dag) -> String {
+/// Bodies of expanded nodes are lazily resolved through the adapter registry.
+pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     let mut out = String::new();
 
     let mut nodes: Vec<_> = dag.all_nodes();
@@ -86,7 +89,7 @@ pub fn format_dag(dag: &Dag) -> String {
         ));
     }
 
-    // Expanded detail for ready and in-progress nodes
+    // Expanded detail for ready and in-progress nodes — lazy resolution happens here
     let actionable: Vec<_> = nodes
         .iter()
         .filter(|n| {
@@ -109,7 +112,9 @@ pub fn format_dag(dag: &Dag) -> String {
             }
 
             if !node.body.is_empty() {
-                out.push_str(&format!("\n{}\n", node.body));
+                // Lazy resolution: resolve @scheme:reference lines through adapters
+                let resolved = resolver::resolve_body(&node.body, registry);
+                out.push_str(&format!("\n{}\n", resolved));
             }
 
             if !node.context.is_empty() {

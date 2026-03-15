@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use amos::adapter::AdapterRegistry;
 use amos::cli::{Cli, Command};
 use amos::dag::Dag;
+use amos::file_adapter::FileAdapter;
+use amos::gh_adapter::GhAdapter;
 use amos::output;
 use amos::parser;
 use amos::scanner;
@@ -101,16 +103,20 @@ fn main() -> Result<()> {
     dag.apply_status_overlay(statuses);
 
     eprintln!("amos: {} nodes", dag.all_nodes().len());
-    print!("{}", output::format_dag(&dag));
+    print!("{}", output::format_dag(&dag, &registry));
 
     Ok(())
 }
 
-/// Build the adapter registry. For now, no adapters are registered by default.
-/// Adapters will be configured via .amosrc.toml in the future.
-fn build_registry(_scan_root: &std::path::Path) -> AdapterRegistry {
-    let registry = AdapterRegistry::new();
-    // Future: read .amosrc.toml, register configured adapters
-    // e.g. if [adapters.gh] exists, register GhAdapter
+/// Build the adapter registry with built-in adapters.
+fn build_registry(scan_root: &std::path::Path) -> AdapterRegistry {
+    let mut registry = AdapterRegistry::new();
+
+    // Built-in: file adapter (always available)
+    registry.register(Box::new(FileAdapter::new(scan_root)));
+
+    // Built-in: gh adapter (uses gh CLI at runtime)
+    registry.register(Box::new(GhAdapter::new(None)));
+
     registry
 }
