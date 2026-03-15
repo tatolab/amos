@@ -1,6 +1,8 @@
 pub mod adapter;
 pub mod cli;
 pub mod dag;
+pub mod external_adapter;
+pub mod ffmpeg_adapter;
 pub mod file_adapter;
 pub mod gh_adapter;
 pub mod output;

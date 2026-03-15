@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use amos::adapter::AdapterRegistry;
 use amos::cli::{Cli, Command};
 use amos::dag::Dag;
+use amos::external_adapter::ExternalAdapter;
+use amos::ffmpeg_adapter::FfmpegAdapter;
 use amos::file_adapter::FileAdapter;
 use amos::gh_adapter::GhAdapter;
 use amos::url_adapter::UrlAdapter;
@@ -109,18 +111,36 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build the adapter registry with built-in adapters.
+/// Build the adapter registry with built-in + external adapters.
 fn build_registry(scan_root: &std::path::Path) -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
 
-    // Built-in: file adapter (always available)
+    // Built-in adapters (always available)
     registry.register(Box::new(FileAdapter::new(scan_root)));
-
-    // Built-in: gh adapter (uses gh CLI at runtime, handles private repos)
     registry.register(Box::new(GhAdapter::new(None)));
-
-    // Built-in: url adapter (downloads public URLs to local cache)
     registry.register(Box::new(UrlAdapter::new()));
+    registry.register(Box::new(FfmpegAdapter::new(scan_root)));
+
+    // External adapters from .amosrc.toml
+    let config_path = scan_root.join(".amosrc.toml");
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(config) = content.parse::<toml::Table>() {
+                if let Some(adapters) = config.get("adapters").and_then(|v| v.as_table()) {
+                    for (scheme, settings) in adapters {
+                        // Skip built-in schemes
+                        if ["file", "gh", "url", "ffmpeg"].contains(&scheme.as_str()) {
+                            continue;
+                        }
+                        if let Some(command) = settings.get("command").and_then(|v| v.as_str()) {
+                            eprintln!("amos: registered external adapter '{}' → {}", scheme, command);
+                            registry.register(Box::new(ExternalAdapter::new(scheme, command)));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     registry
 }
