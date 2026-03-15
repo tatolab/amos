@@ -4,15 +4,18 @@ use std::process::Command;
 
 use crate::adapter::{Adapter, ResourceFields};
 use crate::status::ManualStatus;
+use crate::url_adapter::download_to_cache;
 
 /// GitHub adapter — resolves `gh:` URIs via the `gh` CLI.
+///
+/// Handles GitHub-specific resources: issues, private repo files.
+/// For plain public URLs, use the `url:` adapter instead.
 ///
 /// URI formats:
 /// - `gh:15` — issue #15 in the current repo
 /// - `gh:owner/repo#15` — issue #15 in a specific repo
-/// - `gh:owner/repo/path/to/file.png` — file in a repo (images, docs)
+/// - `gh:owner/repo/path/to/file.png` — file in a repo (uses gh for private access)
 pub struct GhAdapter {
-    /// Default repo (e.g. "tatolab/amos"). If None, uses current repo.
     default_repo: Option<String>,
 }
 
@@ -21,7 +24,6 @@ impl GhAdapter {
         GhAdapter { default_repo }
     }
 
-    /// Parse a reference into (repo, issue_number).
     fn parse_ref(&self, reference: &str) -> Result<(Option<String>, u64)> {
         if let Some((repo, num_str)) = reference.split_once('#') {
             let num: u64 = num_str
@@ -36,7 +38,6 @@ impl GhAdapter {
         }
     }
 
-    /// Fetch a single issue via `gh issue view`.
     fn fetch_issue(&self, repo: Option<&str>, number: u64) -> Result<IssueData> {
         let mut cmd = Command::new("gh");
         cmd.args(["issue", "view", &number.to_string()]);
@@ -73,10 +74,8 @@ impl GhAdapter {
         })
     }
 
-    /// Resolve a file reference like `owner/repo/path/to/file.png`.
-    /// Downloads the file via `gh api` and returns appropriate content.
+    /// Resolve a file in a GitHub repo. Uses `gh` for auth (works with private repos).
     fn resolve_file(&self, reference: &str) -> Result<ResourceFields> {
-        // Split into owner/repo and path: first two segments are owner/repo
         let parts: Vec<&str> = reference.splitn(3, '/').collect();
         if parts.len() < 3 {
             bail!(
@@ -92,32 +91,28 @@ impl GhAdapter {
             .iter()
             .any(|ext| file_path.to_lowercase().ends_with(ext));
 
+        // Use gh api for private repo access
+        let raw_url = format!(
+            "https://raw.githubusercontent.com/{}/HEAD/{}",
+            repo, file_path
+        );
+
         if is_image {
-            // For images: construct the raw URL for Claude Code to read
-            let raw_url = format!(
-                "https://raw.githubusercontent.com/{}/HEAD/{}",
-                repo, file_path
-            );
             let filename = file_path.rsplit('/').next().unwrap_or(file_path);
+            let local_path = download_to_cache(&raw_url, filename)?;
             Ok(ResourceFields {
                 name: None,
                 description: None,
                 status: None,
-                body: Some(format!("![{}]({})", filename, raw_url)),
+                body: Some(format!("![{}]({})", filename, local_path.display())),
             })
         } else {
-            // For text files: fetch raw content via githubusercontent
-            let raw_url = format!(
-                "https://raw.githubusercontent.com/{}/HEAD/{}",
-                repo, file_path
-            );
             let mut cmd = Command::new("gh");
             cmd.args(["api", &raw_url, "--method", "GET"]);
 
             let output = cmd.output().context("failed to run gh api")?;
 
             if !output.status.success() {
-                // Fallback: just emit a reference link
                 return Ok(ResourceFields {
                     name: None,
                     description: None,
@@ -141,7 +136,6 @@ impl GhAdapter {
         }
     }
 
-    /// Batch fetch issues via `gh issue list`.
     fn fetch_issues_batch(
         &self,
         repo: Option<&str>,
@@ -151,9 +145,6 @@ impl GhAdapter {
             return Ok(HashMap::new());
         }
 
-        // gh issue list doesn't filter by number directly in older versions,
-        // so we fetch individually. For repos with many issues, a single
-        // `gh api` call would be more efficient — optimize later.
         let mut results = HashMap::new();
         for &num in numbers {
             match self.fetch_issue(repo, num) {
@@ -184,7 +175,7 @@ impl IssueData {
                 if self.labels.iter().any(|l| l == "in-progress") {
                     Some(ManualStatus::InProgress)
                 } else {
-                    None // Open with no label = not started
+                    None
                 }
             }
             _ => None,
@@ -199,27 +190,30 @@ impl Adapter for GhAdapter {
 
     fn resolve(&self, reference: &str) -> Result<ResourceFields> {
         // Detect file references: contains `/` but no `#`, and doesn't parse as a number
-        if reference.contains('/') && !reference.contains('#') && reference.parse::<u64>().is_err() {
+        if reference.contains('/') && !reference.contains('#') && reference.parse::<u64>().is_err()
+        {
             return self.resolve_file(reference);
         }
 
         let (repo, number) = self.parse_ref(reference)?;
         let issue = self.fetch_issue(repo.as_deref(), number)?;
 
+        // Download any images embedded in the issue body to local cache
+        let body = if issue.body.is_empty() {
+            None
+        } else {
+            Some(localize_markdown_images(&issue.body))
+        };
+
         Ok(ResourceFields {
             name: Some(issue.title.clone()),
             description: Some(issue.title.clone()),
             status: issue.to_status(),
-            body: if issue.body.is_empty() {
-                None
-            } else {
-                Some(issue.body)
-            },
+            body,
         })
     }
 
     fn resolve_batch(&self, references: &[&str]) -> Result<HashMap<String, ResourceFields>> {
-        // Group by repo
         let mut by_repo: HashMap<Option<String>, Vec<(String, u64)>> = HashMap::new();
         for &reference in references {
             let (repo, number) = self.parse_ref(reference)?;
@@ -255,4 +249,67 @@ impl Adapter for GhAdapter {
 
         Ok(results)
     }
+}
+
+/// Scan markdown for `![alt](url)` with remote URLs, download to local cache,
+/// replace URLs with local paths so Claude Code reads images directly.
+fn localize_markdown_images(body: &str) -> String {
+    let mut result = String::with_capacity(body.len());
+
+    for line in body.lines() {
+        if line.contains("![") && line.contains("](http") {
+            result.push_str(&localize_images_in_line(line));
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+
+    if result.ends_with('\n') && !body.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+fn localize_images_in_line(line: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = line;
+
+    while let Some(start) = remaining.find("![") {
+        result.push_str(&remaining[..start]);
+
+        let after_bang = &remaining[start + 2..];
+        if let Some(close_bracket) = after_bang.find("](") {
+            let alt = &after_bang[..close_bracket];
+            let after_paren = &after_bang[close_bracket + 2..];
+
+            if let Some(close_paren) = after_paren.find(')') {
+                let url = &after_paren[..close_paren];
+
+                if url.starts_with("http") {
+                    let filename = url.rsplit('/').next().unwrap_or("image.png");
+                    match download_to_cache(url, filename) {
+                        Ok(local) => {
+                            result.push_str(&format!("![{}]({})", alt, local.display()));
+                        }
+                        Err(_) => {
+                            result.push_str(&format!("![{}]({})", alt, url));
+                        }
+                    }
+                } else {
+                    result.push_str(&format!("![{}]({})", alt, url));
+                }
+
+                remaining = &after_paren[close_paren + 1..];
+                continue;
+            }
+        }
+
+        result.push_str("![");
+        remaining = after_bang;
+    }
+
+    result.push_str(remaining);
+    result
 }

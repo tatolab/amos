@@ -7,6 +7,7 @@ use amos::cli::{Cli, Command};
 use amos::dag::Dag;
 use amos::file_adapter::FileAdapter;
 use amos::gh_adapter::GhAdapter;
+use amos::url_adapter::UrlAdapter;
 use amos::output;
 use amos::parser;
 use amos::scanner;
@@ -115,8 +116,11 @@ fn build_registry(scan_root: &std::path::Path) -> AdapterRegistry {
     // Built-in: file adapter (always available)
     registry.register(Box::new(FileAdapter::new(scan_root)));
 
-    // Built-in: gh adapter (uses gh CLI at runtime)
+    // Built-in: gh adapter (uses gh CLI at runtime, handles private repos)
     registry.register(Box::new(GhAdapter::new(None)));
+
+    // Built-in: url adapter (downloads public URLs to local cache)
+    registry.register(Box::new(UrlAdapter::new()));
 
     registry
 }
