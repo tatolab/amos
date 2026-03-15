@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod adapter_pull;
 pub mod cli;
 pub mod dag;
 pub mod external_adapter;

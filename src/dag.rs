@@ -425,6 +425,7 @@ mod tests {
             upstream: upstream.into_iter().map(String::from).collect(),
             downstream: downstream.into_iter().map(String::from).collect(),
             context: Vec::new(),
+            adapters: std::collections::HashMap::new(),
             source_file: PathBuf::from("test.md"),
             line_number: 1,
             body: String::new(),

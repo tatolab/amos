@@ -3,9 +3,9 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use amos::adapter::AdapterRegistry;
+use amos::adapter_pull::{self, TrustConfig};
 use amos::cli::{Cli, Command};
 use amos::dag::Dag;
-use amos::external_adapter::ExternalAdapter;
 use amos::ffmpeg_adapter::FfmpegAdapter;
 use amos::file_adapter::FileAdapter;
 use amos::gh_adapter::GhAdapter;
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
     let nodes = parser::parse_blocks(&blocks).context("parsing amos blocks")?;
 
     // Build adapter registry
-    let registry = build_registry(&scan_root);
+    let registry = build_registry(&scan_root, &nodes);
 
     // Handle sync command
     if matches!(&cli.command, Some(Command::Sync)) {
@@ -111,9 +111,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build the adapter registry with built-in + external adapters.
-fn build_registry(scan_root: &std::path::Path) -> AdapterRegistry {
+/// Build the adapter registry with built-in + auto-pulled + config adapters.
+fn build_registry(scan_root: &std::path::Path, nodes: &[amos::parser::Node]) -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
+
+    let builtin_schemes = ["file", "github", "url", "ffmpeg"];
 
     // Built-in adapters (always available)
     registry.register(Box::new(FileAdapter::new(scan_root)));
@@ -121,20 +123,26 @@ fn build_registry(scan_root: &std::path::Path) -> AdapterRegistry {
     registry.register(Box::new(UrlAdapter::new()));
     registry.register(Box::new(FfmpegAdapter::new(scan_root)));
 
-    // External adapters from .amosrc.toml
+    // Auto-pull adapters declared in node frontmatter
+    let trust = TrustConfig::load(scan_root);
+    let pulled = adapter_pull::build_declared_adapters(nodes, &trust, &builtin_schemes);
+    for (_scheme, adapter) in pulled {
+        registry.register(Box::new(adapter));
+    }
+
+    // External adapters from .amosrc.toml [adapters] section (command-based)
     let config_path = scan_root.join(".amosrc.toml");
     if config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
             if let Ok(config) = content.parse::<toml::Table>() {
                 if let Some(adapters) = config.get("adapters").and_then(|v| v.as_table()) {
                     for (scheme, settings) in adapters {
-                        // Skip built-in schemes
-                        if ["file", "github", "url", "ffmpeg"].contains(&scheme.as_str()) {
+                        if builtin_schemes.contains(&scheme.as_str()) {
                             continue;
                         }
                         if let Some(command) = settings.get("command").and_then(|v| v.as_str()) {
                             eprintln!("amos: registered external adapter '{}' → {}", scheme, command);
-                            registry.register(Box::new(ExternalAdapter::new(scheme, command)));
+                            registry.register(Box::new(amos::external_adapter::ExternalAdapter::new(scheme, command)));
                         }
                     }
                 }

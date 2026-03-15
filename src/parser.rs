@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::scanner::RawBlock;
@@ -17,6 +18,8 @@ pub struct Node {
     pub downstream: Vec<String>,
     /// Context references (local files, @github:, @url:).
     pub context: Vec<ContextRef>,
+    /// Adapter declarations — scheme → source URI for auto-pull.
+    pub adapters: HashMap<String, String>,
     /// Source file where this node was defined.
     pub source_file: PathBuf,
     /// Line number of the opening --- (1-based).
@@ -50,6 +53,8 @@ struct RawFrontmatter {
     dependencies: Vec<String>,
     #[serde(default)]
     context: Vec<String>,
+    #[serde(default)]
+    adapters: HashMap<String, String>,
 }
 
 /// Parse a raw block into a Node.
@@ -117,6 +122,7 @@ pub fn parse_block(block: &RawBlock) -> Result<Node> {
         upstream,
         downstream,
         context,
+        adapters: frontmatter.adapters,
         source_file: block.source_file.clone(),
         line_number: block.line_number,
         body: block.body.clone(),
