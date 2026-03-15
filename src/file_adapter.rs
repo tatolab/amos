@@ -48,7 +48,12 @@ impl Adapter for FileAdapter {
     }
 
     fn resolve(&self, reference: &str) -> Result<ResourceFields> {
-        let full_path = self.scan_root.join(reference);
+        let ref_path = std::path::Path::new(reference);
+        let full_path = if ref_path.is_absolute() {
+            ref_path.to_path_buf()
+        } else {
+            self.scan_root.join(reference)
+        };
 
         if !full_path.exists() {
             bail!("file not found: {}", full_path.display());
