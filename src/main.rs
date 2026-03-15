@@ -82,6 +82,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Handle show command
+    if let Some(Command::Show { node }) = &cli.command {
+        print!("{}", output::format_node(&dag, node, &registry));
+        return Ok(());
+    }
+
     // Handle sync command
     if matches!(&cli.command, Some(Command::Sync)) {
         let uri_nodes: Vec<&str> = nodes

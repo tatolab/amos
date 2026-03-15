@@ -161,6 +161,73 @@ fn format_context_ref(ctx: &crate::parser::ContextRef) -> String {
     }
 }
 
+/// Format a single node with its fully resolved body.
+pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String {
+    let mut out = String::new();
+
+    let Some(node) = dag.get_node(name) else {
+        out.push_str(&format!("Node '{}' not found\n", name));
+        return out;
+    };
+
+    let status = dag
+        .compute_status(name)
+        .unwrap_or(ComputedStatus::Blocked);
+    let display_name = linkify_name(name);
+
+    out.push_str(&format!("## {} [{}]\n", display_name, status));
+
+    if let Some(desc) = &node.description {
+        out.push_str(&format!("\n{}\n", desc));
+    }
+
+    if !node.upstream.is_empty() {
+        let deps: Vec<String> = node
+            .upstream
+            .iter()
+            .map(|u| {
+                let s = dag
+                    .compute_status(u)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                format!("{} [{}]", u, s)
+            })
+            .collect();
+        out.push_str(&format!("\n**depends on:** {}\n", deps.join(", ")));
+    }
+
+    if !node.downstream.is_empty() {
+        let blocks: Vec<String> = node
+            .downstream
+            .iter()
+            .map(|d| {
+                let s = dag
+                    .compute_status(d)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                format!("{} [{}]", d, s)
+            })
+            .collect();
+        out.push_str(&format!("**blocks:** {}\n", blocks.join(", ")));
+    }
+
+    if !node.body.is_empty() {
+        let resolved = resolver::resolve_body(&node.body, registry);
+        out.push_str(&format!("\n{}\n", resolved));
+    }
+
+    if !node.context.is_empty() {
+        out.push_str("\n**Context:**\n");
+        for ctx in &node.context {
+            out.push_str(&format!("- {}\n", format_context_ref(ctx)));
+        }
+    }
+
+    out.push_str(&format!("\n**Source:** {}\n", node.source_file.display()));
+
+    out
+}
+
 /// Format the DAG as an ASCII dependency tree.
 pub fn format_graph(dag: &Dag) -> String {
     let mut out = String::new();

@@ -39,4 +39,9 @@ pub enum Command {
     Prune,
     /// Print the DAG as an ASCII dependency tree
     Graph,
+    /// Show a single node with its fully resolved body
+    Show {
+        /// Node name (e.g. @github:tatolab/amos#22)
+        node: String,
+    },
 }
