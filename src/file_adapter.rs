@@ -32,6 +32,14 @@ impl FileAdapter {
             .and_then(|e| e.to_str())
             .is_some_and(|ext| text_extensions.contains(&ext.to_lowercase().as_str()))
     }
+
+    fn is_image_file(path: &Path) -> bool {
+        let image_extensions = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"];
+
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| image_extensions.contains(&ext.to_lowercase().as_str()))
+    }
 }
 
 impl Adapter for FileAdapter {
@@ -58,13 +66,26 @@ impl Adapter for FileAdapter {
                 status: None,
                 body: Some(format!("```{}\n{}\n```", ext, content)),
             })
-        } else {
-            // Binary file — return path for Claude Code to read directly
+        } else if Self::is_image_file(&full_path) {
+            // Image — emit markdown image syntax with absolute path.
+            // Claude Code reads image paths natively via its Read tool.
+            let filename = full_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("image");
             Ok(ResourceFields {
                 name: None,
                 description: None,
                 status: None,
-                body: Some(format!("[file: {}]", full_path.display())),
+                body: Some(format!("![{}]({})", filename, full_path.display())),
+            })
+        } else {
+            // Other binary (PDF, etc.) — emit path for Claude Code to read
+            Ok(ResourceFields {
+                name: None,
+                description: None,
+                status: None,
+                body: Some(format!("📎 {}", full_path.display())),
             })
         }
     }

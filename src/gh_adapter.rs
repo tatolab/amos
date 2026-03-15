@@ -10,6 +10,7 @@ use crate::status::ManualStatus;
 /// URI formats:
 /// - `gh:15` — issue #15 in the current repo
 /// - `gh:owner/repo#15` — issue #15 in a specific repo
+/// - `gh:owner/repo/path/to/file.png` — file in a repo (images, docs)
 pub struct GhAdapter {
     /// Default repo (e.g. "tatolab/amos"). If None, uses current repo.
     default_repo: Option<String>,
@@ -72,6 +73,74 @@ impl GhAdapter {
         })
     }
 
+    /// Resolve a file reference like `owner/repo/path/to/file.png`.
+    /// Downloads the file via `gh api` and returns appropriate content.
+    fn resolve_file(&self, reference: &str) -> Result<ResourceFields> {
+        // Split into owner/repo and path: first two segments are owner/repo
+        let parts: Vec<&str> = reference.splitn(3, '/').collect();
+        if parts.len() < 3 {
+            bail!(
+                "invalid file reference '{}' — expected owner/repo/path",
+                reference
+            );
+        }
+        let repo = format!("{}/{}", parts[0], parts[1]);
+        let file_path = parts[2];
+
+        let image_extensions = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
+        let is_image = image_extensions
+            .iter()
+            .any(|ext| file_path.to_lowercase().ends_with(ext));
+
+        if is_image {
+            // For images: construct the raw URL for Claude Code to read
+            let raw_url = format!(
+                "https://raw.githubusercontent.com/{}/HEAD/{}",
+                repo, file_path
+            );
+            let filename = file_path.rsplit('/').next().unwrap_or(file_path);
+            Ok(ResourceFields {
+                name: None,
+                description: None,
+                status: None,
+                body: Some(format!("![{}]({})", filename, raw_url)),
+            })
+        } else {
+            // For text files: fetch raw content via githubusercontent
+            let raw_url = format!(
+                "https://raw.githubusercontent.com/{}/HEAD/{}",
+                repo, file_path
+            );
+            let mut cmd = Command::new("gh");
+            cmd.args(["api", &raw_url, "--method", "GET"]);
+
+            let output = cmd.output().context("failed to run gh api")?;
+
+            if !output.status.success() {
+                // Fallback: just emit a reference link
+                return Ok(ResourceFields {
+                    name: None,
+                    description: None,
+                    status: None,
+                    body: Some(format!(
+                        "[GitHub file: {}/{}](https://github.com/{}/blob/HEAD/{})",
+                        repo, file_path, repo, file_path
+                    )),
+                });
+            }
+
+            let content = String::from_utf8_lossy(&output.stdout).to_string();
+            let ext = file_path.rsplit('.').next().unwrap_or("");
+
+            Ok(ResourceFields {
+                name: None,
+                description: None,
+                status: None,
+                body: Some(format!("```{}\n{}\n```", ext, content)),
+            })
+        }
+    }
+
     /// Batch fetch issues via `gh issue list`.
     fn fetch_issues_batch(
         &self,
@@ -129,6 +198,11 @@ impl Adapter for GhAdapter {
     }
 
     fn resolve(&self, reference: &str) -> Result<ResourceFields> {
+        // Detect file references: contains `/` but no `#`, and doesn't parse as a number
+        if reference.contains('/') && !reference.contains('#') && reference.parse::<u64>().is_err() {
+            return self.resolve_file(reference);
+        }
+
         let (repo, number) = self.parse_ref(reference)?;
         let issue = self.fetch_issue(repo.as_deref(), number)?;
 
