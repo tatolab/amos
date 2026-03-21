@@ -9,14 +9,12 @@ use crate::parser::Node;
 
 /// The dependency DAG built from parsed nodes.
 ///
-/// The DAG is a pure data structure — it stores the graph and an overlay
-/// of status strings from `.amos-status`. It does not interpret what any
-/// status value means. The consuming agent reads the raw facts and reasons
-/// about readiness, completion, and priority.
+/// Pure data structure — stores the graph of nodes and edges.
+/// No status interpretation. Adapters provide facts on demand,
+/// the consuming agent reasons about them.
 pub struct Dag {
     pub graph: DiGraph<Node, ()>,
     pub name_to_index: HashMap<String, NodeIndex>,
-    status_overlay: HashMap<String, String>,
 }
 
 /// A validation issue found during DAG check.
@@ -66,11 +64,6 @@ impl std::fmt::Display for DagIssue {
 }
 
 impl Dag {
-    /// Apply external status overlay (from .amos-status file or adapters).
-    pub fn apply_status_overlay(&mut self, statuses: HashMap<String, String>) {
-        self.status_overlay = statuses;
-    }
-
     /// Build a DAG from parsed nodes.
     pub fn build(nodes: Vec<Node>) -> Result<Self> {
         let mut graph = DiGraph::new();
@@ -123,7 +116,6 @@ impl Dag {
         Ok(Dag {
             graph,
             name_to_index,
-            status_overlay: HashMap::new(),
         })
     }
 
@@ -132,12 +124,6 @@ impl Dag {
         self.name_to_index
             .get(name)
             .map(|&idx| &self.graph[idx])
-    }
-
-    /// Get the raw overlay status for a node (from .amos-status).
-    /// Returns the status string as-is — no interpretation.
-    pub fn get_overlay_status(&self, name: &str) -> Option<&str> {
-        self.status_overlay.get(name).map(|s| s.as_str())
     }
 
     /// Find shortest path between two nodes (BFS).
@@ -341,38 +327,6 @@ mod tests {
             line_number: 1,
             body: String::new(),
         }
-    }
-
-    fn with_status(mut dag: Dag, statuses: Vec<(&str, &str)>) -> Dag {
-        let map: HashMap<String, String> = statuses
-            .into_iter()
-            .map(|(n, s)| (n.to_string(), s.to_string()))
-            .collect();
-        dag.apply_status_overlay(map);
-        dag
-    }
-
-    #[test]
-    fn test_overlay_status() {
-        let nodes = vec![
-            make_node("a", vec![], vec!["b"]),
-            make_node("b", vec!["a"], vec![]),
-        ];
-        let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", "done")]);
-
-        assert_eq!(dag.get_overlay_status("a"), Some("done"));
-        assert_eq!(dag.get_overlay_status("b"), None);
-    }
-
-    #[test]
-    fn test_overlay_preserves_raw_strings() {
-        let nodes = vec![make_node("a", vec![], vec![])];
-        let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", "In Review")]);
-
-        // Amos stores the string as-is — no interpretation
-        assert_eq!(dag.get_overlay_status("a"), Some("In Review"));
     }
 
     #[test]

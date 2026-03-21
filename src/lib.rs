@@ -10,5 +10,5 @@ pub mod output;
 pub mod parser;
 pub mod resolver;
 pub mod scanner;
-pub mod status;
+
 pub mod url_adapter;

@@ -25,10 +25,6 @@ pub enum Command {
         /// Freeform message — the adapter decides how to record it
         message: String,
     },
-    /// Sync status from external adapters (resolves URIs in node names)
-    Sync,
-    /// Remove done nodes that aren't needed by active work
-    Prune,
     /// Print the DAG as an ASCII dependency tree
     Graph,
     /// Show a single node with its fully resolved body

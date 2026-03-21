@@ -2,8 +2,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
-use std::collections::HashSet;
-
 use amos::adapter::AdapterRegistry;
 use amos::adapter_pull::{self, TrustConfig};
 use amos::cli::{Cli, Command};
@@ -15,7 +13,6 @@ use amos::url_adapter::UrlAdapter;
 use amos::output;
 use amos::parser;
 use amos::scanner;
-use amos::status;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -36,7 +33,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Scan + parse (needed for sync and default dump)
+    // Scan + parse
     let blocks = scanner::scan_directory(&scan_root)
         .with_context(|| format!("scanning {}", scan_root.display()))?;
 
@@ -50,15 +47,8 @@ fn main() -> Result<()> {
     // Build adapter registry
     let registry = build_registry(&scan_root, &nodes);
 
-    // Handle commands that need the DAG
-    let mut dag = Dag::build(nodes.clone()).context("building DAG")?;
-    let statuses = status::read_status_file(&scan_root);
-    dag.apply_status_overlay(statuses);
-
-    // Handle prune command
-    if matches!(&cli.command, Some(Command::Prune)) {
-        return handle_prune(&dag, &scan_root);
-    }
+    // Build DAG
+    let dag = Dag::build(nodes.clone()).context("building DAG")?;
 
     // Handle graph command
     if matches!(&cli.command, Some(Command::Graph)) {
@@ -72,102 +62,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Handle sync command
-    if matches!(&cli.command, Some(Command::Sync)) {
-        let uri_nodes: Vec<&str> = nodes
-            .iter()
-            .filter(|n| registry.is_resolvable(&n.name))
-            .map(|n| n.name.as_str())
-            .collect();
-
-        if uri_nodes.is_empty() {
-            eprintln!("No adapter-backed nodes found");
-            return Ok(());
-        }
-
-        let results = registry
-            .resolve_batch(&uri_nodes)
-            .context("syncing from adapters")?;
-
-        let mut synced = 0;
-        for (uri, fields) in &results {
-            // Write the "state" fact to the overlay if the adapter provided one
-            if let Some(state) = fields.facts.get("state") {
-                status::write_status(&scan_root, uri, state)
-                    .with_context(|| format!("writing status for {}", uri))?;
-                // Show all facts the adapter returned
-                let facts_display: Vec<String> = fields
-                    .facts
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect();
-                eprintln!("{}: {}", uri, facts_display.join(", "));
-                synced += 1;
-            }
-        }
-
-        eprintln!("amos: synced {} node(s)", synced);
-        return Ok(());
-    }
-
     // Default: dump the DAG
     eprintln!("amos: {} nodes", dag.all_nodes().len());
     print!("{}", output::format_dag(&dag, &registry));
 
     Ok(())
-}
-
-/// Prune nodes explicitly marked "done" in .amos-status that aren't
-/// needed as upstream context for non-done nodes.
-fn handle_prune(dag: &Dag, scan_root: &std::path::Path) -> Result<()> {
-    let all_nodes = dag.all_nodes();
-
-    // Collect all non-done nodes and everything transitively upstream of them
-    let mut needed: HashSet<String> = HashSet::new();
-    for node in &all_nodes {
-        if dag.get_overlay_status(&node.name) != Some("done") {
-            needed.insert(node.name.clone());
-            collect_upstream(dag, &node.name, &mut needed);
-        }
-    }
-
-    // Prunable = explicitly marked done and not needed by non-done nodes
-    let prunable: Vec<_> = all_nodes
-        .iter()
-        .filter(|n| {
-            dag.get_overlay_status(&n.name) == Some("done") && !needed.contains(&n.name)
-        })
-        .collect();
-
-    if prunable.is_empty() {
-        eprintln!("amos: nothing to prune");
-        return Ok(());
-    }
-
-    for node in &prunable {
-        // Delete the source file
-        if node.source_file.exists() {
-            std::fs::remove_file(&node.source_file).with_context(|| {
-                format!("deleting {}", node.source_file.display())
-            })?;
-            eprintln!("pruned: {} ({})", node.name, node.source_file.display());
-        }
-
-        // Remove from .amos-status
-        let _ = status::clear_status(scan_root, &node.name);
-    }
-
-    eprintln!("amos: pruned {} node(s)", prunable.len());
-    Ok(())
-}
-
-/// Recursively collect all upstream nodes.
-fn collect_upstream(dag: &Dag, name: &str, visited: &mut HashSet<String>) {
-    for upstream in dag.upstream_of(name) {
-        if visited.insert(upstream.name.clone()) {
-            collect_upstream(dag, &upstream.name, visited);
-        }
-    }
 }
 
 /// Build the adapter registry.
