@@ -40,7 +40,7 @@ impl GhAdapter {
     fn fetch_issue(&self, repo: Option<&str>, number: u64) -> Result<IssueData> {
         let mut cmd = Command::new("gh");
         cmd.args(["issue", "view", &number.to_string()]);
-        cmd.args(["--json", "title,body,state,labels"]);
+        cmd.args(["--json", "title,body,state,labels,comments"]);
 
         if let Some(r) = repo {
             cmd.args(["--repo", r]);
@@ -58,6 +58,27 @@ impl GhAdapter {
         let json: serde_json::Value =
             serde_json::from_slice(&output.stdout).context("parsing gh output")?;
 
+        let comments = json["comments"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let author = c["author"]["login"].as_str().unwrap_or("unknown");
+                        let created = c["createdAt"]
+                            .as_str()
+                            .and_then(|s| s.get(..10))
+                            .unwrap_or("");
+                        let body = c["body"].as_str()?;
+                        Some(Comment {
+                            author: author.to_string(),
+                            date: created.to_string(),
+                            body: body.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(IssueData {
             title: json["title"].as_str().unwrap_or("").to_string(),
             body: json["body"].as_str().unwrap_or("").to_string(),
@@ -70,6 +91,7 @@ impl GhAdapter {
                         .collect()
                 })
                 .unwrap_or_default(),
+            comments,
         })
     }
 
@@ -159,11 +181,18 @@ impl GhAdapter {
     }
 }
 
+struct Comment {
+    author: String,
+    date: String,
+    body: String,
+}
+
 struct IssueData {
     title: String,
     body: String,
     state: String,
     labels: Vec<String>,
+    comments: Vec<Comment>,
 }
 
 impl IssueData {
@@ -194,10 +223,23 @@ impl Adapter for GhAdapter {
         let issue = self.fetch_issue(repo.as_deref(), number)?;
 
         // Download any images embedded in the issue body to local cache
-        let body = if issue.body.is_empty() {
+        let mut body_parts = Vec::new();
+        if !issue.body.is_empty() {
+            body_parts.push(localize_markdown_images(&issue.body));
+        }
+
+        // Append comments so the consuming agent has full context
+        if !issue.comments.is_empty() {
+            body_parts.push("\n### Comments\n".to_string());
+            for c in &issue.comments {
+                body_parts.push(format!("**{}** ({}) — {}\n", c.date, c.author, c.body));
+            }
+        }
+
+        let body = if body_parts.is_empty() {
             None
         } else {
-            Some(localize_markdown_images(&issue.body))
+            Some(body_parts.join("\n"))
         };
 
         Ok(ResourceFields {
