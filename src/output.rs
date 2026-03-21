@@ -2,8 +2,7 @@ use crate::adapter::AdapterRegistry;
 use crate::dag::Dag;
 use crate::resolver;
 
-/// Format the full DAG state as structured, readable output.
-/// Shows raw facts — no interpretation of what statuses mean.
+/// Format the full DAG as structured, readable output.
 /// Bodies are lazily resolved through the adapter registry.
 pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     let mut out = String::new();
@@ -21,37 +20,23 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
         out.push('\n');
     }
 
-    // DAG summary — one line per node with raw overlay status
+    // DAG summary — one line per node
     out.push_str("## DAG\n\n");
     for node in &nodes {
         let desc = node.description.as_deref().unwrap_or("");
         let display_name = linkify_name(&node.name);
 
-        if let Some(status) = dag.get_overlay_status(&node.name) {
-            out.push_str(&format!("- **{}** [{}]", display_name, status));
-        } else {
-            out.push_str(&format!("- **{}**", display_name));
-        }
+        out.push_str(&format!("- **{}**", display_name));
         if !desc.is_empty() {
             out.push_str(&format!(" — {}", desc));
         }
         out.push('\n');
 
         if !node.upstream.is_empty() {
-            let deps: Vec<String> = node
-                .upstream
-                .iter()
-                .map(|u| format_dep_ref(dag, u))
-                .collect();
-            out.push_str(&format!("  depends on: {}\n", deps.join(", ")));
+            out.push_str(&format!("  depends on: {}\n", node.upstream.join(", ")));
         }
         if !node.downstream.is_empty() {
-            let blocks: Vec<String> = node
-                .downstream
-                .iter()
-                .map(|d| format_dep_ref(dag, d))
-                .collect();
-            out.push_str(&format!("  blocks: {}\n", blocks.join(", ")));
+            out.push_str(&format!("  blocks: {}\n", node.downstream.join(", ")));
         }
     }
 
@@ -86,11 +71,7 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
 
         for node in &has_body {
             let display_name = linkify_name(&node.name);
-            if let Some(status) = dag.get_overlay_status(&node.name) {
-                out.push_str(&format!("\n### {} [{}]\n", display_name, status));
-            } else {
-                out.push_str(&format!("\n### {}\n", display_name));
-            }
+            out.push_str(&format!("\n### {}\n", display_name));
 
             if let Some(desc) = &node.description {
                 out.push_str(&format!("\n{}\n", desc));
@@ -110,15 +91,6 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     }
 
     out
-}
-
-/// Format a dependency reference with its overlay status if present.
-fn format_dep_ref(dag: &Dag, name: &str) -> String {
-    if let Some(status) = dag.get_overlay_status(name) {
-        format!("{} [{}]", name, status)
-    } else {
-        name.to_string()
-    }
 }
 
 /// Convert `@github:owner/repo#N` names into markdown links.
@@ -161,33 +133,18 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
     };
 
     let display_name = linkify_name(name);
-
-    if let Some(status) = dag.get_overlay_status(name) {
-        out.push_str(&format!("## {} [{}]\n", display_name, status));
-    } else {
-        out.push_str(&format!("## {}\n", display_name));
-    }
+    out.push_str(&format!("## {}\n", display_name));
 
     if let Some(desc) = &node.description {
         out.push_str(&format!("\n{}\n", desc));
     }
 
     if !node.upstream.is_empty() {
-        let deps: Vec<String> = node
-            .upstream
-            .iter()
-            .map(|u| format_dep_ref(dag, u))
-            .collect();
-        out.push_str(&format!("\n**depends on:** {}\n", deps.join(", ")));
+        out.push_str(&format!("\n**depends on:** {}\n", node.upstream.join(", ")));
     }
 
     if !node.downstream.is_empty() {
-        let blocks: Vec<String> = node
-            .downstream
-            .iter()
-            .map(|d| format_dep_ref(dag, d))
-            .collect();
-        out.push_str(&format!("**blocks:** {}\n", blocks.join(", ")));
+        out.push_str(&format!("**blocks:** {}\n", node.downstream.join(", ")));
     }
 
     if !node.body.is_empty() {
@@ -208,7 +165,6 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
 }
 
 /// Format the DAG as an ASCII dependency tree.
-/// Shows raw overlay status — no interpretation.
 pub fn format_graph(dag: &Dag) -> String {
     let mut out = String::new();
 
@@ -251,11 +207,6 @@ fn format_tree_node(
         "├── "
     };
 
-    let status_tag = dag
-        .get_overlay_status(name)
-        .map(|s| format!("[{}] ", s))
-        .unwrap_or_default();
-
     let desc = dag
         .get_node(name)
         .and_then(|n| n.description.as_deref())
@@ -266,15 +217,15 @@ fn format_tree_node(
     // If already printed (diamond merge), show a back-reference
     if !printed.insert(name.to_string()) {
         out.push_str(&format!(
-            "{}{}{}{} (→ see above)\n",
-            prefix, connector, status_tag, display
+            "{}{}{} (→ see above)\n",
+            prefix, connector, display
         ));
         return;
     }
 
     out.push_str(&format!(
-        "{}{}{}{} {}\n",
-        prefix, connector, status_tag, display, desc
+        "{}{}{} {}\n",
+        prefix, connector, display, desc
     ));
 
     let mut children: Vec<_> = dag.downstream_of(name);

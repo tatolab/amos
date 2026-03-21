@@ -86,7 +86,7 @@ download_or_build() {
 # Install Claude Code skills from the repo
 install_skills() {
   local skills_src="https://raw.githubusercontent.com/${REPO}/main/.claude/skills"
-  local skills=("amos" "amos-graph" "amos-show" "amos-sync" "amos-notify" "amos-create" "amos-prune")
+  local skills=("amos" "amos-graph" "amos-show" "amos-notify" "amos-create")
 
   info "installing Claude Code skills to ${DIM}${SKILLS_DIR}${RESET}"
 
