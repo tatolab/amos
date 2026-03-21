@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
 use crate::adapter::{Adapter, ResourceFields};
-use crate::status::ManualStatus;
 
 /// External adapter — runs a subprocess that speaks the amos adapter protocol.
 ///
@@ -139,12 +138,8 @@ impl ExternalAdapter {
     }
 }
 
-fn parse_status(value: &serde_json::Value) -> Option<ManualStatus> {
-    match value.as_str() {
-        Some("done") => Some(ManualStatus::Done),
-        Some("in-progress") => Some(ManualStatus::InProgress),
-        _ => None,
-    }
+fn parse_status(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(String::from)
 }
 
 fn json_to_fields(json: &serde_json::Value) -> ResourceFields {

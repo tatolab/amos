@@ -6,24 +6,61 @@ use petgraph::Direction;
 use std::collections::HashMap;
 
 use crate::parser::Node;
-use crate::status::ManualStatus;
 
 /// Computed status of a node in the DAG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ready` and `Blocked` are computed by the DAG from dependency edges.
+/// `External` carries the raw status string from an adapter or the
+/// `.amos-status` overlay — adapters define their own vocabulary
+/// (e.g. "closed", "In Review", "Deployed").
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputedStatus {
-    Done,
-    InProgress,
     Ready,
     Blocked,
+    External(String),
+}
+
+impl ComputedStatus {
+    /// Whether this status is considered "done" for dependency resolution.
+    pub fn is_done(&self) -> bool {
+        match self {
+            ComputedStatus::External(s) => is_done_status(s),
+            _ => false,
+        }
+    }
+
+    /// Whether this node is actionable (ready or actively being worked on).
+    pub fn is_actionable(&self) -> bool {
+        match self {
+            ComputedStatus::Ready => true,
+            ComputedStatus::External(s) => is_active_status(s),
+            _ => false,
+        }
+    }
+}
+
+/// Known terminal status strings that count as "done" for dependency edges.
+fn is_done_status(s: &str) -> bool {
+    matches!(
+        s.to_lowercase().as_str(),
+        "done" | "closed" | "resolved" | "completed" | "merged"
+    )
+}
+
+/// Known active status strings (work in progress, not done).
+fn is_active_status(s: &str) -> bool {
+    matches!(
+        s.to_lowercase().as_str(),
+        "in-progress" | "in progress" | "active" | "wip"
+    )
 }
 
 impl std::fmt::Display for ComputedStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ComputedStatus::Done => write!(f, "done"),
-            ComputedStatus::InProgress => write!(f, "in-progress"),
             ComputedStatus::Ready => write!(f, "ready"),
             ComputedStatus::Blocked => write!(f, "blocked"),
+            ComputedStatus::External(s) => write!(f, "{}", s),
         }
     }
 }
@@ -32,7 +69,7 @@ impl std::fmt::Display for ComputedStatus {
 pub struct Dag {
     pub graph: DiGraph<Node, ()>,
     pub name_to_index: HashMap<String, NodeIndex>,
-    status_overlay: HashMap<String, ManualStatus>,
+    status_overlay: HashMap<String, String>,
 }
 
 /// A validation issue found during DAG check.
@@ -82,8 +119,8 @@ impl std::fmt::Display for DagIssue {
 }
 
 impl Dag {
-    /// Apply external status overlay (from .amos-status file).
-    pub fn apply_status_overlay(&mut self, statuses: HashMap<String, ManualStatus>) {
+    /// Apply external status overlay (from .amos-status file or adapters).
+    pub fn apply_status_overlay(&mut self, statuses: HashMap<String, String>) {
         self.status_overlay = statuses;
     }
 
@@ -169,21 +206,18 @@ impl Dag {
 
         let node = &self.graph[idx];
 
-        // Check status overlay
-        if let Some(&status) = self.status_overlay.get(&node.name) {
-            match status {
-                ManualStatus::Done => return ComputedStatus::Done,
-                ManualStatus::InProgress => return ComputedStatus::InProgress,
-            }
+        // Check status overlay (from .amos-status or adapter sync)
+        if let Some(status) = self.status_overlay.get(&node.name) {
+            return ComputedStatus::External(status.clone());
         }
 
-        // Rule 3 & 4: check upstream deps
+        // Check upstream deps — all must be done for this node to be ready
         let all_upstream_done = self
             .graph
             .edges_directed(idx, Direction::Incoming)
             .all(|edge| {
                 let upstream_idx = edge.source();
-                self.compute_status_for_index(upstream_idx, visited) == ComputedStatus::Done
+                self.compute_status_for_index(upstream_idx, visited).is_done()
             });
 
         if all_upstream_done {
@@ -219,8 +253,9 @@ impl Dag {
                     .edges_directed(idx, Direction::Incoming)
                     .filter(|edge| {
                         let mut visited = std::collections::HashSet::new();
-                        self.compute_status_for_index(edge.source(), &mut visited)
-                            != ComputedStatus::Done
+                        !self
+                            .compute_status_for_index(edge.source(), &mut visited)
+                            .is_done()
                     })
                     .map(|edge| self.graph[edge.source()].name.clone())
                     .collect();
@@ -432,10 +467,10 @@ mod tests {
         }
     }
 
-    fn with_status(mut dag: Dag, statuses: Vec<(&str, ManualStatus)>) -> Dag {
-        let map: HashMap<String, ManualStatus> = statuses
+    fn with_status(mut dag: Dag, statuses: Vec<(&str, &str)>) -> Dag {
+        let map: HashMap<String, String> = statuses
             .into_iter()
-            .map(|(n, s)| (n.to_string(), s))
+            .map(|(n, s)| (n.to_string(), s.to_string()))
             .collect();
         dag.apply_status_overlay(map);
         dag
@@ -450,9 +485,9 @@ mod tests {
             make_node("c", vec!["b"], vec![]),
         ];
         let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", ManualStatus::Done)]);
+        let dag = with_status(dag, vec![("a", "done")]);
 
-        assert_eq!(dag.compute_status("a"), Some(ComputedStatus::Done));
+        assert!(dag.compute_status("a").unwrap().is_done());
         assert_eq!(dag.compute_status("b"), Some(ComputedStatus::Ready));
         assert_eq!(dag.compute_status("c"), Some(ComputedStatus::Blocked));
     }
@@ -468,8 +503,11 @@ mod tests {
     fn test_in_progress_status() {
         let nodes = vec![make_node("a", vec![], vec![])];
         let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", ManualStatus::InProgress)]);
-        assert_eq!(dag.compute_status("a"), Some(ComputedStatus::InProgress));
+        let dag = with_status(dag, vec![("a", "in-progress")]);
+        assert_eq!(
+            dag.compute_status("a"),
+            Some(ComputedStatus::External("in-progress".to_string()))
+        );
     }
 
     #[test]
@@ -480,9 +518,37 @@ mod tests {
             make_node("c", vec!["b"], vec![]),
         ];
         let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", ManualStatus::Done)]);
+        let dag = with_status(dag, vec![("a", "done")]);
         let ready: Vec<&str> = dag.find_ready().iter().map(|n| n.name.as_str()).collect();
         assert_eq!(ready, vec!["b"]);
+    }
+
+    #[test]
+    fn test_closed_is_done_for_deps() {
+        // GitHub "closed" should unblock downstream
+        let nodes = vec![
+            make_node("a", vec![], vec!["b"]),
+            make_node("b", vec!["a"], vec![]),
+        ];
+        let dag = Dag::build(nodes).unwrap();
+        let dag = with_status(dag, vec![("a", "closed")]);
+
+        assert!(dag.compute_status("a").unwrap().is_done());
+        assert_eq!(dag.compute_status("b"), Some(ComputedStatus::Ready));
+    }
+
+    #[test]
+    fn test_arbitrary_status_not_done() {
+        // A non-terminal status should not unblock downstream
+        let nodes = vec![
+            make_node("a", vec![], vec!["b"]),
+            make_node("b", vec!["a"], vec![]),
+        ];
+        let dag = Dag::build(nodes).unwrap();
+        let dag = with_status(dag, vec![("a", "In Review")]);
+
+        assert!(!dag.compute_status("a").unwrap().is_done());
+        assert_eq!(dag.compute_status("b"), Some(ComputedStatus::Blocked));
     }
 
     #[test]

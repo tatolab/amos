@@ -70,7 +70,7 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     if let Some(topo) = dag.topological_sort() {
         let remaining: Vec<&str> = topo
             .iter()
-            .filter(|n| dag.compute_status(&n.name) != Some(ComputedStatus::Done))
+            .filter(|n| !dag.compute_status(&n.name).map_or(false, |s| s.is_done()))
             .map(|n| n.name.as_str())
             .collect();
         if !remaining.is_empty() {
@@ -94,10 +94,8 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     let actionable: Vec<_> = nodes
         .iter()
         .filter(|n| {
-            matches!(
-                dag.compute_status(&n.name),
-                Some(ComputedStatus::Ready) | Some(ComputedStatus::InProgress)
-            )
+            dag.compute_status(&n.name)
+                .map_or(false, |s| s.is_actionable())
         })
         .collect();
 
@@ -275,11 +273,12 @@ fn format_tree_node(
         .compute_status(name)
         .unwrap_or(ComputedStatus::Blocked);
 
-    let status_marker = match status {
-        ComputedStatus::Done => "✓",
-        ComputedStatus::InProgress => "~",
+    let status_marker = match &status {
         ComputedStatus::Ready => "●",
         ComputedStatus::Blocked => "○",
+        ComputedStatus::External(_) if status.is_done() => "✓",
+        ComputedStatus::External(_) if status.is_actionable() => "~",
+        ComputedStatus::External(_) => "◆",
     };
 
     let desc = dag

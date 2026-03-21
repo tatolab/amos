@@ -15,7 +15,7 @@ use amos::url_adapter::UrlAdapter;
 use amos::output;
 use amos::parser;
 use amos::scanner;
-use amos::status::{self, ManualStatus};
+use amos::status;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -92,13 +92,9 @@ fn main() -> Result<()> {
         let mut synced = 0;
         for (uri, fields) in &results {
             if let Some(s) = &fields.status {
-                status::write_status(&scan_root, uri, *s)
+                status::write_status(&scan_root, uri, s)
                     .with_context(|| format!("writing status for {}", uri))?;
-                let symbol = match s {
-                    ManualStatus::Done => "x",
-                    ManualStatus::InProgress => "~",
-                };
-                eprintln!("[{}] {}", symbol, uri);
+                eprintln!("[{}] {}", s, uri);
                 synced += 1;
             }
         }
@@ -114,19 +110,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-use amos::dag::ComputedStatus;
-
 /// Prune done nodes that aren't upstream of any ready/in-progress work.
 fn handle_prune(dag: &Dag, scan_root: &std::path::Path) -> Result<()> {
-    // Find all ready/in-progress nodes
+    // Find all actionable nodes (ready or in-progress)
     let active_nodes: Vec<&str> = dag
         .all_nodes()
         .iter()
         .filter(|n| {
-            matches!(
-                dag.compute_status(&n.name),
-                Some(ComputedStatus::Ready) | Some(ComputedStatus::InProgress)
-            )
+            dag.compute_status(&n.name)
+                .map_or(false, |s| s.is_actionable())
         })
         .map(|n| n.name.as_str())
         .collect();
@@ -138,12 +130,12 @@ fn handle_prune(dag: &Dag, scan_root: &std::path::Path) -> Result<()> {
         collect_upstream(dag, name, &mut needed);
     }
 
-    // Also keep blocked nodes (they have pending work)
+    // Also keep non-done nodes (they have pending work)
     for node in dag.all_nodes() {
-        if matches!(
-            dag.compute_status(&node.name),
-            Some(ComputedStatus::Blocked) | Some(ComputedStatus::InProgress) | Some(ComputedStatus::Ready)
-        ) {
+        if !dag
+            .compute_status(&node.name)
+            .map_or(false, |s| s.is_done())
+        {
             needed.insert(node.name.clone());
         }
     }
@@ -153,7 +145,9 @@ fn handle_prune(dag: &Dag, scan_root: &std::path::Path) -> Result<()> {
     let prunable: Vec<_> = all_nodes
         .iter()
         .filter(|n| {
-            dag.compute_status(&n.name) == Some(ComputedStatus::Done) && !needed.contains(&n.name)
+            dag.compute_status(&n.name)
+                .map_or(false, |s| s.is_done())
+                && !needed.contains(&n.name)
         })
         .collect();
 

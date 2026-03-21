@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use crate::adapter::{Adapter, ResourceFields};
-use crate::status::ManualStatus;
 use crate::url_adapter::download_to_cache;
 
 /// GitHub adapter — resolves `gh:` URIs via the `gh` CLI.
@@ -168,17 +167,20 @@ struct IssueData {
 }
 
 impl IssueData {
-    fn to_status(&self) -> Option<ManualStatus> {
+    fn to_status(&self) -> Option<String> {
         match self.state.as_str() {
-            "CLOSED" => Some(ManualStatus::Done),
+            "CLOSED" => Some("closed".to_string()),
             "OPEN" => {
-                if self.labels.iter().any(|l| l == "in-progress") {
-                    Some(ManualStatus::InProgress)
-                } else {
-                    None
+                // Surface status-like labels from the external system
+                for label in &self.labels {
+                    let lower = label.to_lowercase();
+                    if lower == "in-progress" || lower == "in progress" {
+                        return Some(label.clone());
+                    }
                 }
+                None // open with no status label = no explicit status
             }
-            _ => None,
+            other => Some(other.to_lowercase()),
         }
     }
 }

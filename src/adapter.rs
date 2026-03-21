@@ -1,15 +1,13 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use crate::status::ManualStatus;
-
 /// Resolved fields from an adapter. Each field is optional —
 /// the adapter returns whatever it can resolve for the given URI.
 #[derive(Debug, Default, Clone)]
 pub struct ResourceFields {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub status: Option<ManualStatus>,
+    pub status: Option<String>,
     pub body: Option<String>,
 }
 
@@ -153,7 +151,7 @@ mod tests {
             Ok(ResourceFields {
                 name: Some(format!("Mock: {}", reference)),
                 description: Some("Resolved by mock adapter".to_string()),
-                status: Some(ManualStatus::Done),
+                status: Some("done".to_string()),
                 body: None,
             })
         }
@@ -172,7 +170,7 @@ mod tests {
 
         let fields = registry.resolve("@mock:issue-42").unwrap().unwrap();
         assert_eq!(fields.name.as_deref(), Some("Mock: issue-42"));
-        assert_eq!(fields.status, Some(ManualStatus::Done));
+        assert_eq!(fields.status.as_deref(), Some("done"));
     }
 
     #[test]
