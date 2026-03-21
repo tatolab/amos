@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -212,7 +213,7 @@ impl Adapter for FfmpegAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(body),
             })
         } else if is_audio(&full_path) {
@@ -225,7 +226,7 @@ impl Adapter for FfmpegAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!(
                     "**Audio: {}**\n\n![{} waveform]({})\n",
                     reference, filename, waveform.display()

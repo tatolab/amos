@@ -1,10 +1,10 @@
 use crate::adapter::AdapterRegistry;
-use crate::dag::{ComputedStatus, Dag};
+use crate::dag::Dag;
 use crate::resolver;
 
 /// Format the full DAG state as structured, readable output.
-/// Compact lines for done/blocked nodes, expanded with body for ready/in-progress.
-/// Bodies of expanded nodes are lazily resolved through the adapter registry.
+/// Shows raw facts — no interpretation of what statuses mean.
+/// Bodies are lazily resolved through the adapter registry.
 pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     let mut out = String::new();
 
@@ -21,16 +21,17 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
         out.push('\n');
     }
 
-    // DAG summary — one line per node
+    // DAG summary — one line per node with raw overlay status
     out.push_str("## DAG\n\n");
     for node in &nodes {
-        let status = dag
-            .compute_status(&node.name)
-            .unwrap_or(ComputedStatus::Blocked);
         let desc = node.description.as_deref().unwrap_or("");
-
         let display_name = linkify_name(&node.name);
-        out.push_str(&format!("- **{}** [{}]", display_name, status));
+
+        if let Some(status) = dag.get_overlay_status(&node.name) {
+            out.push_str(&format!("- **{}** [{}]", display_name, status));
+        } else {
+            out.push_str(&format!("- **{}**", display_name));
+        }
         if !desc.is_empty() {
             out.push_str(&format!(" — {}", desc));
         }
@@ -40,13 +41,7 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
             let deps: Vec<String> = node
                 .upstream
                 .iter()
-                .map(|u| {
-                    let s = dag
-                        .compute_status(u)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    format!("{} [{}]", u, s)
-                })
+                .map(|u| format_dep_ref(dag, u))
                 .collect();
             out.push_str(&format!("  depends on: {}\n", deps.join(", ")));
         }
@@ -54,29 +49,19 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
             let blocks: Vec<String> = node
                 .downstream
                 .iter()
-                .map(|d| {
-                    let s = dag
-                        .compute_status(d)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    format!("{} [{}]", d, s)
-                })
+                .map(|d| format_dep_ref(dag, d))
                 .collect();
             out.push_str(&format!("  blocks: {}\n", blocks.join(", ")));
         }
     }
 
-    // Execution order
+    // Topological order
     if let Some(topo) = dag.topological_sort() {
-        let remaining: Vec<&str> = topo
-            .iter()
-            .filter(|n| dag.compute_status(&n.name) != Some(ComputedStatus::Done))
-            .map(|n| n.name.as_str())
-            .collect();
-        if !remaining.is_empty() {
+        let names: Vec<&str> = topo.iter().map(|n| n.name.as_str()).collect();
+        if !names.is_empty() {
             out.push_str(&format!(
-                "\n## Execution Order\n\n{}\n",
-                remaining.join(" → ")
+                "\n## Topological Order\n\n{}\n",
+                names.join(" → ")
             ));
         }
     }
@@ -90,34 +75,30 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
         ));
     }
 
-    // Expanded detail for ready and in-progress nodes — lazy resolution happens here
-    let actionable: Vec<_> = nodes
+    // Expanded detail for all nodes with bodies — lazy resolution happens here
+    let has_body: Vec<_> = nodes
         .iter()
-        .filter(|n| {
-            matches!(
-                dag.compute_status(&n.name),
-                Some(ComputedStatus::Ready) | Some(ComputedStatus::InProgress)
-            )
-        })
+        .filter(|n| !n.body.is_empty())
         .collect();
 
-    if !actionable.is_empty() {
-        out.push_str("\n## Ready / In-Progress\n");
+    if !has_body.is_empty() {
+        out.push_str("\n## Detail\n");
 
-        for node in &actionable {
-            let status = dag.compute_status(&node.name).unwrap();
+        for node in &has_body {
             let display_name = linkify_name(&node.name);
-            out.push_str(&format!("\n### {} [{}]\n", display_name, status));
+            if let Some(status) = dag.get_overlay_status(&node.name) {
+                out.push_str(&format!("\n### {} [{}]\n", display_name, status));
+            } else {
+                out.push_str(&format!("\n### {}\n", display_name));
+            }
 
             if let Some(desc) = &node.description {
                 out.push_str(&format!("\n{}\n", desc));
             }
 
-            if !node.body.is_empty() {
-                // Lazy resolution: resolve @scheme:reference lines through adapters
-                let resolved = resolver::resolve_body(&node.body, registry);
-                out.push_str(&format!("\n{}\n", resolved));
-            }
+            // Lazy resolution: resolve @scheme:reference lines through adapters
+            let resolved = resolver::resolve_body(&node.body, registry);
+            out.push_str(&format!("\n{}\n", resolved));
 
             if !node.context.is_empty() {
                 out.push_str("\n**Context:**\n");
@@ -129,6 +110,15 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     }
 
     out
+}
+
+/// Format a dependency reference with its overlay status if present.
+fn format_dep_ref(dag: &Dag, name: &str) -> String {
+    if let Some(status) = dag.get_overlay_status(name) {
+        format!("{} [{}]", name, status)
+    } else {
+        name.to_string()
+    }
 }
 
 /// Convert `@github:owner/repo#N` names into markdown links.
@@ -170,12 +160,13 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
         return out;
     };
 
-    let status = dag
-        .compute_status(name)
-        .unwrap_or(ComputedStatus::Blocked);
     let display_name = linkify_name(name);
 
-    out.push_str(&format!("## {} [{}]\n", display_name, status));
+    if let Some(status) = dag.get_overlay_status(name) {
+        out.push_str(&format!("## {} [{}]\n", display_name, status));
+    } else {
+        out.push_str(&format!("## {}\n", display_name));
+    }
 
     if let Some(desc) = &node.description {
         out.push_str(&format!("\n{}\n", desc));
@@ -185,13 +176,7 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
         let deps: Vec<String> = node
             .upstream
             .iter()
-            .map(|u| {
-                let s = dag
-                    .compute_status(u)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                format!("{} [{}]", u, s)
-            })
+            .map(|u| format_dep_ref(dag, u))
             .collect();
         out.push_str(&format!("\n**depends on:** {}\n", deps.join(", ")));
     }
@@ -200,13 +185,7 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
         let blocks: Vec<String> = node
             .downstream
             .iter()
-            .map(|d| {
-                let s = dag
-                    .compute_status(d)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                format!("{} [{}]", d, s)
-            })
+            .map(|d| format_dep_ref(dag, d))
             .collect();
         out.push_str(&format!("**blocks:** {}\n", blocks.join(", ")));
     }
@@ -229,6 +208,7 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
 }
 
 /// Format the DAG as an ASCII dependency tree.
+/// Shows raw overlay status — no interpretation.
 pub fn format_graph(dag: &Dag) -> String {
     let mut out = String::new();
 
@@ -271,16 +251,10 @@ fn format_tree_node(
         "├── "
     };
 
-    let status = dag
-        .compute_status(name)
-        .unwrap_or(ComputedStatus::Blocked);
-
-    let status_marker = match status {
-        ComputedStatus::Done => "✓",
-        ComputedStatus::InProgress => "~",
-        ComputedStatus::Ready => "●",
-        ComputedStatus::Blocked => "○",
-    };
+    let status_tag = dag
+        .get_overlay_status(name)
+        .map(|s| format!("[{}] ", s))
+        .unwrap_or_default();
 
     let desc = dag
         .get_node(name)
@@ -292,15 +266,15 @@ fn format_tree_node(
     // If already printed (diamond merge), show a back-reference
     if !printed.insert(name.to_string()) {
         out.push_str(&format!(
-            "{}{}{} {} (→ see above)\n",
-            prefix, connector, status_marker, display
+            "{}{}{}{} (→ see above)\n",
+            prefix, connector, status_tag, display
         ));
         return;
     }
 
     out.push_str(&format!(
-        "{}{}{} {} {}\n",
-        prefix, connector, status_marker, display, desc
+        "{}{}{}{} {}\n",
+        prefix, connector, status_tag, display, desc
     ));
 
     let mut children: Vec<_> = dag.downstream_of(name);

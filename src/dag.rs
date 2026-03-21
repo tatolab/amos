@@ -6,33 +6,17 @@ use petgraph::Direction;
 use std::collections::HashMap;
 
 use crate::parser::Node;
-use crate::status::ManualStatus;
-
-/// Computed status of a node in the DAG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComputedStatus {
-    Done,
-    InProgress,
-    Ready,
-    Blocked,
-}
-
-impl std::fmt::Display for ComputedStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ComputedStatus::Done => write!(f, "done"),
-            ComputedStatus::InProgress => write!(f, "in-progress"),
-            ComputedStatus::Ready => write!(f, "ready"),
-            ComputedStatus::Blocked => write!(f, "blocked"),
-        }
-    }
-}
 
 /// The dependency DAG built from parsed nodes.
+///
+/// The DAG is a pure data structure — it stores the graph and an overlay
+/// of status strings from `.amos-status`. It does not interpret what any
+/// status value means. The consuming agent reads the raw facts and reasons
+/// about readiness, completion, and priority.
 pub struct Dag {
     pub graph: DiGraph<Node, ()>,
     pub name_to_index: HashMap<String, NodeIndex>,
-    status_overlay: HashMap<String, ManualStatus>,
+    status_overlay: HashMap<String, String>,
 }
 
 /// A validation issue found during DAG check.
@@ -82,8 +66,8 @@ impl std::fmt::Display for DagIssue {
 }
 
 impl Dag {
-    /// Apply external status overlay (from .amos-status file).
-    pub fn apply_status_overlay(&mut self, statuses: HashMap<String, ManualStatus>) {
+    /// Apply external status overlay (from .amos-status file or adapters).
+    pub fn apply_status_overlay(&mut self, statuses: HashMap<String, String>) {
         self.status_overlay = statuses;
     }
 
@@ -150,83 +134,10 @@ impl Dag {
             .map(|&idx| &self.graph[idx])
     }
 
-    /// Compute the status of a single node.
-    pub fn compute_status(&self, name: &str) -> Option<ComputedStatus> {
-        let &idx = self.name_to_index.get(name)?;
-        let mut visited = std::collections::HashSet::new();
-        Some(self.compute_status_for_index(idx, &mut visited))
-    }
-
-    fn compute_status_for_index(
-        &self,
-        idx: NodeIndex,
-        visited: &mut std::collections::HashSet<NodeIndex>,
-    ) -> ComputedStatus {
-        if !visited.insert(idx) {
-            // Cycle — can never resolve to done
-            return ComputedStatus::Blocked;
-        }
-
-        let node = &self.graph[idx];
-
-        // Check status overlay
-        if let Some(&status) = self.status_overlay.get(&node.name) {
-            match status {
-                ManualStatus::Done => return ComputedStatus::Done,
-                ManualStatus::InProgress => return ComputedStatus::InProgress,
-            }
-        }
-
-        // Rule 3 & 4: check upstream deps
-        let all_upstream_done = self
-            .graph
-            .edges_directed(idx, Direction::Incoming)
-            .all(|edge| {
-                let upstream_idx = edge.source();
-                self.compute_status_for_index(upstream_idx, visited) == ComputedStatus::Done
-            });
-
-        if all_upstream_done {
-            ComputedStatus::Ready
-        } else {
-            ComputedStatus::Blocked
-        }
-    }
-
-    /// Find all nodes with status Ready.
-    pub fn find_ready(&self) -> Vec<&Node> {
-        self.graph
-            .node_indices()
-            .filter(|&idx| {
-                let mut visited = std::collections::HashSet::new();
-                self.compute_status_for_index(idx, &mut visited) == ComputedStatus::Ready
-            })
-            .map(|idx| &self.graph[idx])
-            .collect()
-    }
-
-    /// Find all blocked nodes with the names of what blocks them.
-    pub fn find_blocked_with_blockers(&self) -> Vec<(&Node, Vec<String>)> {
-        self.graph
-            .node_indices()
-            .filter(|&idx| {
-                let mut visited = std::collections::HashSet::new();
-                self.compute_status_for_index(idx, &mut visited) == ComputedStatus::Blocked
-            })
-            .map(|idx| {
-                let blockers: Vec<String> = self
-                    .graph
-                    .edges_directed(idx, Direction::Incoming)
-                    .filter(|edge| {
-                        let mut visited = std::collections::HashSet::new();
-                        self.compute_status_for_index(edge.source(), &mut visited)
-                            != ComputedStatus::Done
-                    })
-                    .map(|edge| self.graph[edge.source()].name.clone())
-                    .collect();
-                (&self.graph[idx], blockers)
-            })
-            .collect()
+    /// Get the raw overlay status for a node (from .amos-status).
+    /// Returns the status string as-is — no interpretation.
+    pub fn get_overlay_status(&self, name: &str) -> Option<&str> {
+        self.status_overlay.get(name).map(|s| s.as_str())
     }
 
     /// Find shortest path between two nodes (BFS).
@@ -432,75 +343,52 @@ mod tests {
         }
     }
 
-    fn with_status(mut dag: Dag, statuses: Vec<(&str, ManualStatus)>) -> Dag {
-        let map: HashMap<String, ManualStatus> = statuses
+    fn with_status(mut dag: Dag, statuses: Vec<(&str, &str)>) -> Dag {
+        let map: HashMap<String, String> = statuses
             .into_iter()
-            .map(|(n, s)| (n.to_string(), s))
+            .map(|(n, s)| (n.to_string(), s.to_string()))
             .collect();
         dag.apply_status_overlay(map);
         dag
     }
 
     #[test]
-    fn test_simple_chain_status() {
-        // A -> B -> C, A is done
+    fn test_overlay_status() {
+        let nodes = vec![
+            make_node("a", vec![], vec!["b"]),
+            make_node("b", vec!["a"], vec![]),
+        ];
+        let dag = Dag::build(nodes).unwrap();
+        let dag = with_status(dag, vec![("a", "done")]);
+
+        assert_eq!(dag.get_overlay_status("a"), Some("done"));
+        assert_eq!(dag.get_overlay_status("b"), None);
+    }
+
+    #[test]
+    fn test_overlay_preserves_raw_strings() {
+        let nodes = vec![make_node("a", vec![], vec![])];
+        let dag = Dag::build(nodes).unwrap();
+        let dag = with_status(dag, vec![("a", "In Review")]);
+
+        // Amos stores the string as-is — no interpretation
+        assert_eq!(dag.get_overlay_status("a"), Some("In Review"));
+    }
+
+    #[test]
+    fn test_graph_structure() {
         let nodes = vec![
             make_node("a", vec![], vec!["b"]),
             make_node("b", vec!["a"], vec!["c"]),
             make_node("c", vec!["b"], vec![]),
         ];
         let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", ManualStatus::Done)]);
 
-        assert_eq!(dag.compute_status("a"), Some(ComputedStatus::Done));
-        assert_eq!(dag.compute_status("b"), Some(ComputedStatus::Ready));
-        assert_eq!(dag.compute_status("c"), Some(ComputedStatus::Blocked));
-    }
-
-    #[test]
-    fn test_no_deps_is_ready() {
-        let nodes = vec![make_node("a", vec![], vec![])];
-        let dag = Dag::build(nodes).unwrap();
-        assert_eq!(dag.compute_status("a"), Some(ComputedStatus::Ready));
-    }
-
-    #[test]
-    fn test_in_progress_status() {
-        let nodes = vec![make_node("a", vec![], vec![])];
-        let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", ManualStatus::InProgress)]);
-        assert_eq!(dag.compute_status("a"), Some(ComputedStatus::InProgress));
-    }
-
-    #[test]
-    fn test_find_ready() {
-        let nodes = vec![
-            make_node("a", vec![], vec!["b"]),
-            make_node("b", vec!["a"], vec!["c"]),
-            make_node("c", vec!["b"], vec![]),
-        ];
-        let dag = Dag::build(nodes).unwrap();
-        let dag = with_status(dag, vec![("a", ManualStatus::Done)]);
-        let ready: Vec<&str> = dag.find_ready().iter().map(|n| n.name.as_str()).collect();
-        assert_eq!(ready, vec!["b"]);
-    }
-
-    #[test]
-    fn test_blocked_with_blockers() {
-        let nodes = vec![
-            make_node("a", vec![], vec!["c"]),
-            make_node("b", vec![], vec!["c"]),
-            make_node("c", vec!["a", "b"], vec![]),
-        ];
-        let dag = Dag::build(nodes).unwrap();
-        // a and b are ready (no upstream), c is blocked by a and b
-        // But a and b are "ready" not "done", so c is blocked
-        let blocked = dag.find_blocked_with_blockers();
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].0.name, "c");
-        let mut blockers = blocked[0].1.clone();
-        blockers.sort();
-        assert_eq!(blockers, vec!["a", "b"]);
+        assert!(dag.upstream_of("a").is_empty());
+        assert_eq!(dag.upstream_of("b").len(), 1);
+        assert_eq!(dag.upstream_of("b")[0].name, "a");
+        assert_eq!(dag.downstream_of("a").len(), 1);
+        assert_eq!(dag.downstream_of("a")[0].name, "b");
     }
 
     #[test]
