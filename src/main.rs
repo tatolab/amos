@@ -3,7 +3,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use amos::adapter::AdapterRegistry;
-use amos::adapter_pull::{self, TrustConfig};
+use amos::adapter_pull;
 use amos::cli::{Cli, Command};
 use amos::dag::Dag;
 use amos::ffmpeg_adapter::FfmpegAdapter;
@@ -84,8 +84,7 @@ fn build_registry(scan_root: &std::path::Path, nodes: &[amos::parser::Node]) -> 
 
     // 2. Auto-pull adapters from frontmatter declarations
     //    "builtin" sources are skipped. Custom sources override built-ins.
-    let trust = TrustConfig::load(scan_root);
-    let pulled = adapter_pull::build_declared_adapters(nodes, &trust);
+    let pulled = adapter_pull::build_declared_adapters(nodes);
     for (_scheme, adapter) in pulled {
         registry.register(Box::new(adapter));
     }
