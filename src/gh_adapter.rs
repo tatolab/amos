@@ -102,7 +102,7 @@ impl GhAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!("![{}]({})", filename, local_path.display())),
             })
         } else {
@@ -115,7 +115,7 @@ impl GhAdapter {
                 return Ok(ResourceFields {
                     name: None,
                     description: None,
-                    status: None,
+                    facts: HashMap::new(),
                     body: Some(format!(
                         "[GitHub file: {}/{}](https://github.com/{}/blob/HEAD/{})",
                         repo, file_path, repo, file_path
@@ -129,7 +129,7 @@ impl GhAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!("```{}\n{}\n```", ext, content)),
             })
         }
@@ -167,21 +167,14 @@ struct IssueData {
 }
 
 impl IssueData {
-    fn to_status(&self) -> Option<String> {
-        match self.state.as_str() {
-            "CLOSED" => Some("closed".to_string()),
-            "OPEN" => {
-                // Surface status-like labels from the external system
-                for label in &self.labels {
-                    let lower = label.to_lowercase();
-                    if lower == "in-progress" || lower == "in progress" {
-                        return Some(label.clone());
-                    }
-                }
-                None // open with no status label = no explicit status
-            }
-            other => Some(other.to_lowercase()),
+    /// Return raw facts from GitHub — the consuming agent interprets them.
+    fn to_facts(&self) -> HashMap<String, String> {
+        let mut facts = HashMap::new();
+        facts.insert("state".to_string(), self.state.clone());
+        if !self.labels.is_empty() {
+            facts.insert("labels".to_string(), self.labels.join(", "));
         }
+        facts
     }
 }
 
@@ -210,8 +203,8 @@ impl Adapter for GhAdapter {
         Ok(ResourceFields {
             name: Some(issue.title.clone()),
             description: Some(issue.title.clone()),
-            status: issue.to_status(),
             body,
+            facts: issue.to_facts(),
         })
     }
 
@@ -264,12 +257,12 @@ impl Adapter for GhAdapter {
                         ResourceFields {
                             name: Some(issue.title.clone()),
                             description: Some(issue.title.clone()),
-                            status: issue.to_status(),
                             body: if issue.body.is_empty() {
                                 None
                             } else {
                                 Some(issue.body.clone())
                             },
+                            facts: issue.to_facts(),
                         },
                     );
                 }

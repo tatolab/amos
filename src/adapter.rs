@@ -7,8 +7,12 @@ use std::collections::HashMap;
 pub struct ResourceFields {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub status: Option<String>,
     pub body: Option<String>,
+    /// Raw facts from the external system. The adapter decides what to include.
+    /// Amos passes these through without interpretation — the consuming agent
+    /// reads the facts and reasons about them.
+    /// Examples: {"state": "CLOSED", "labels": "bug, priority-high"}
+    pub facts: HashMap<String, String>,
 }
 
 /// Adapter trait — resolves URIs within a registered scheme.
@@ -151,8 +155,8 @@ mod tests {
             Ok(ResourceFields {
                 name: Some(format!("Mock: {}", reference)),
                 description: Some("Resolved by mock adapter".to_string()),
-                status: Some("done".to_string()),
                 body: None,
+                facts: HashMap::from([("state".to_string(), "closed".to_string())]),
             })
         }
     }
@@ -170,7 +174,7 @@ mod tests {
 
         let fields = registry.resolve("@mock:issue-42").unwrap().unwrap();
         assert_eq!(fields.name.as_deref(), Some("Mock: issue-42"));
-        assert_eq!(fields.status.as_deref(), Some("done"));
+        assert_eq!(fields.facts.get("state").map(|s| s.as_str()), Some("closed"));
     }
 
     #[test]

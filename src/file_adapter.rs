@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::adapter::{Adapter, ResourceFields};
@@ -68,7 +69,7 @@ impl Adapter for FileAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!("```{}\n{}\n```", ext, content)),
             })
         } else if Self::is_image_file(&full_path) {
@@ -81,7 +82,7 @@ impl Adapter for FileAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!("![{}]({})", filename, full_path.display())),
             })
         } else {
@@ -89,7 +90,7 @@ impl Adapter for FileAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!("📎 {}", full_path.display())),
             })
         }

@@ -138,16 +138,27 @@ impl ExternalAdapter {
     }
 }
 
-fn parse_status(value: &serde_json::Value) -> Option<String> {
-    value.as_str().map(String::from)
-}
-
 fn json_to_fields(json: &serde_json::Value) -> ResourceFields {
+    // Extract all non-reserved fields as raw facts for the consuming agent
+    let mut facts = HashMap::new();
+    if let Some(obj) = json.as_object() {
+        for (key, value) in obj {
+            if matches!(key.as_str(), "name" | "description" | "body") {
+                continue;
+            }
+            if let Some(s) = value.as_str() {
+                facts.insert(key.clone(), s.to_string());
+            } else if !value.is_null() {
+                facts.insert(key.clone(), value.to_string());
+            }
+        }
+    }
+
     ResourceFields {
         name: json["name"].as_str().map(String::from),
         description: json["description"].as_str().map(String::from),
-        status: parse_status(&json["status"]),
         body: json["body"].as_str().map(String::from),
+        facts,
     }
 }
 

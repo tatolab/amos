@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -31,7 +32,7 @@ impl Adapter for UrlAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(format!("![{}]({})", filename, local_path.display())),
             })
         } else {
@@ -41,7 +42,7 @@ impl Adapter for UrlAdapter {
             Ok(ResourceFields {
                 name: None,
                 description: None,
-                status: None,
+                facts: HashMap::new(),
                 body: Some(if ext.is_empty() {
                     content
                 } else {

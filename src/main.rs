@@ -91,10 +91,17 @@ fn main() -> Result<()> {
 
         let mut synced = 0;
         for (uri, fields) in &results {
-            if let Some(s) = &fields.status {
-                status::write_status(&scan_root, uri, s)
+            // Write the "state" fact to the overlay if the adapter provided one
+            if let Some(state) = fields.facts.get("state") {
+                status::write_status(&scan_root, uri, state)
                     .with_context(|| format!("writing status for {}", uri))?;
-                eprintln!("[{}] {}", s, uri);
+                // Show all facts the adapter returned
+                let facts_display: Vec<String> = fields
+                    .facts
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
+                eprintln!("{}: {}", uri, facts_display.join(", "));
                 synced += 1;
             }
         }
@@ -110,44 +117,25 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Prune done nodes that aren't upstream of any ready/in-progress work.
+/// Prune nodes explicitly marked "done" in .amos-status that aren't
+/// needed as upstream context for non-done nodes.
 fn handle_prune(dag: &Dag, scan_root: &std::path::Path) -> Result<()> {
-    // Find all actionable nodes (ready or in-progress)
-    let active_nodes: Vec<&str> = dag
-        .all_nodes()
-        .iter()
-        .filter(|n| {
-            dag.compute_status(&n.name)
-                .map_or(false, |s| s.is_actionable())
-        })
-        .map(|n| n.name.as_str())
-        .collect();
+    let all_nodes = dag.all_nodes();
 
-    // Collect all nodes that are transitively upstream of active nodes
+    // Collect all non-done nodes and everything transitively upstream of them
     let mut needed: HashSet<String> = HashSet::new();
-    for name in &active_nodes {
-        needed.insert(name.to_string());
-        collect_upstream(dag, name, &mut needed);
-    }
-
-    // Also keep non-done nodes (they have pending work)
-    for node in dag.all_nodes() {
-        if !dag
-            .compute_status(&node.name)
-            .map_or(false, |s| s.is_done())
-        {
+    for node in &all_nodes {
+        if dag.get_overlay_status(&node.name) != Some("done") {
             needed.insert(node.name.clone());
+            collect_upstream(dag, &node.name, &mut needed);
         }
     }
 
-    // Find done nodes that aren't needed
-    let all_nodes = dag.all_nodes();
+    // Prunable = explicitly marked done and not needed by non-done nodes
     let prunable: Vec<_> = all_nodes
         .iter()
         .filter(|n| {
-            dag.compute_status(&n.name)
-                .map_or(false, |s| s.is_done())
-                && !needed.contains(&n.name)
+            dag.get_overlay_status(&n.name) == Some("done") && !needed.contains(&n.name)
         })
         .collect();
 
