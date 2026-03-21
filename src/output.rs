@@ -1,14 +1,51 @@
-use crate::adapter::AdapterRegistry;
+use std::collections::HashMap;
+
+use crate::adapter::{AdapterRegistry, ResourceFields};
 use crate::dag::Dag;
 use crate::resolver;
 
+/// Batch-resolve all adapter-backed nodes in the DAG.
+/// Returns a map of node name → resolved facts.
+fn resolve_all_facts(dag: &Dag, registry: &AdapterRegistry) -> HashMap<String, ResourceFields> {
+    let uri_nodes: Vec<&str> = dag
+        .all_nodes()
+        .iter()
+        .filter(|n| registry.is_resolvable(&n.name))
+        .map(|n| n.name.as_str())
+        .collect();
+
+    if uri_nodes.is_empty() {
+        return HashMap::new();
+    }
+
+    registry.resolve_batch(&uri_nodes).unwrap_or_default()
+}
+
+/// Format adapter facts as a compact inline string.
+/// e.g. "state=CLOSED, labels=bug, priority-high"
+fn format_facts(facts: &HashMap<String, String>) -> String {
+    if facts.is_empty() {
+        return String::new();
+    }
+    let mut parts: Vec<String> = facts
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+    parts.sort();
+    parts.join(", ")
+}
+
 /// Format the full DAG as structured, readable output.
+/// Resolves adapter-backed nodes to show live facts.
 /// Bodies are lazily resolved through the adapter registry.
 pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     let mut out = String::new();
 
     let mut nodes: Vec<_> = dag.all_nodes();
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Batch-resolve adapter facts for all nodes
+    let resolved = resolve_all_facts(dag, registry);
 
     // Validation issues first — cycles, missing deps
     let issues = dag.validate(std::path::Path::new("."));
@@ -20,23 +57,41 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
         out.push('\n');
     }
 
-    // DAG summary — one line per node
+    // DAG summary — one line per node with live adapter facts
     out.push_str("## DAG\n\n");
     for node in &nodes {
         let desc = node.description.as_deref().unwrap_or("");
         let display_name = linkify_name(&node.name);
 
-        out.push_str(&format!("- **{}**", display_name));
+        // Show adapter facts inline if available
+        let facts_tag = resolved
+            .get(&node.name)
+            .map(|f| format_facts(&f.facts))
+            .filter(|s| !s.is_empty())
+            .map(|s| format!(" [{}]", s))
+            .unwrap_or_default();
+
+        out.push_str(&format!("- **{}**{}", display_name, facts_tag));
         if !desc.is_empty() {
             out.push_str(&format!(" — {}", desc));
         }
         out.push('\n');
 
         if !node.upstream.is_empty() {
-            out.push_str(&format!("  depends on: {}\n", node.upstream.join(", ")));
+            let deps: Vec<String> = node
+                .upstream
+                .iter()
+                .map(|u| format_dep_ref(u, &resolved))
+                .collect();
+            out.push_str(&format!("  depends on: {}\n", deps.join(", ")));
         }
         if !node.downstream.is_empty() {
-            out.push_str(&format!("  blocks: {}\n", node.downstream.join(", ")));
+            let blocks: Vec<String> = node
+                .downstream
+                .iter()
+                .map(|d| format_dep_ref(d, &resolved))
+                .collect();
+            out.push_str(&format!("  blocks: {}\n", blocks.join(", ")));
         }
     }
 
@@ -61,25 +116,28 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     }
 
     // Expanded detail for all nodes with bodies — lazy resolution happens here
-    let has_body: Vec<_> = nodes
-        .iter()
-        .filter(|n| !n.body.is_empty())
-        .collect();
+    let has_body: Vec<_> = nodes.iter().filter(|n| !n.body.is_empty()).collect();
 
     if !has_body.is_empty() {
         out.push_str("\n## Detail\n");
 
         for node in &has_body {
             let display_name = linkify_name(&node.name);
-            out.push_str(&format!("\n### {}\n", display_name));
+            let facts_tag = resolved
+                .get(&node.name)
+                .map(|f| format_facts(&f.facts))
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" [{}]", s))
+                .unwrap_or_default();
+
+            out.push_str(&format!("\n### {}{}\n", display_name, facts_tag));
 
             if let Some(desc) = &node.description {
                 out.push_str(&format!("\n{}\n", desc));
             }
 
-            // Lazy resolution: resolve @scheme:reference lines through adapters
-            let resolved = resolver::resolve_body(&node.body, registry);
-            out.push_str(&format!("\n{}\n", resolved));
+            let resolved_body = resolver::resolve_body(&node.body, registry);
+            out.push_str(&format!("\n{}\n", resolved_body));
 
             if !node.context.is_empty() {
                 out.push_str("\n**Context:**\n");
@@ -93,8 +151,18 @@ pub fn format_dag(dag: &Dag, registry: &AdapterRegistry) -> String {
     out
 }
 
+/// Format a dependency reference with its adapter facts if resolved.
+fn format_dep_ref(name: &str, resolved: &HashMap<String, ResourceFields>) -> String {
+    if let Some(fields) = resolved.get(name) {
+        let facts = format_facts(&fields.facts);
+        if !facts.is_empty() {
+            return format!("{} [{}]", name, facts);
+        }
+    }
+    name.to_string()
+}
+
 /// Convert `@github:owner/repo#N` names into markdown links.
-/// Other names pass through as-is.
 fn linkify_name(name: &str) -> String {
     if let Some(rest) = name.strip_prefix("@github:") {
         if let Some((repo, number)) = rest.split_once('#') {
@@ -123,7 +191,7 @@ fn format_context_ref(ctx: &crate::parser::ContextRef) -> String {
     }
 }
 
-/// Format a single node with its fully resolved body.
+/// Format a single node with its fully resolved body and adapter facts.
 pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String {
     let mut out = String::new();
 
@@ -133,7 +201,20 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
     };
 
     let display_name = linkify_name(name);
-    out.push_str(&format!("## {}\n", display_name));
+
+    // Resolve adapter facts for this node
+    let adapter_facts = registry
+        .resolve(name)
+        .and_then(|r| r.ok());
+
+    let facts_tag = adapter_facts
+        .as_ref()
+        .map(|f| format_facts(&f.facts))
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" [{}]", s))
+        .unwrap_or_default();
+
+    out.push_str(&format!("## {}{}\n", display_name, facts_tag));
 
     if let Some(desc) = &node.description {
         out.push_str(&format!("\n{}\n", desc));
@@ -164,8 +245,8 @@ pub fn format_node(dag: &Dag, name: &str, registry: &AdapterRegistry) -> String 
     out
 }
 
-/// Format the DAG as an ASCII dependency tree.
-pub fn format_graph(dag: &Dag) -> String {
+/// Format the DAG as an ASCII dependency tree with live adapter facts.
+pub fn format_graph(dag: &Dag, registry: &AdapterRegistry) -> String {
     let mut out = String::new();
 
     let nodes = dag.all_nodes();
@@ -173,7 +254,10 @@ pub fn format_graph(dag: &Dag) -> String {
         return out;
     }
 
-    // Find root nodes (no upstream dependencies, or upstream not in the DAG)
+    // Batch-resolve adapter facts
+    let resolved = resolve_all_facts(dag, registry);
+
+    // Find root nodes (no upstream dependencies)
     let mut roots: Vec<&crate::parser::Node> = nodes
         .iter()
         .filter(|n| dag.upstream_of(&n.name).is_empty())
@@ -181,11 +265,10 @@ pub fn format_graph(dag: &Dag) -> String {
         .collect();
     roots.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Track what we've printed to avoid duplicates in diamond shapes
     let mut printed = std::collections::HashSet::new();
 
     for root in &roots {
-        format_tree_node(&mut out, dag, &root.name, "", true, &mut printed);
+        format_tree_node(&mut out, dag, &root.name, "", true, &mut printed, &resolved);
     }
 
     out
@@ -198,6 +281,7 @@ fn format_tree_node(
     prefix: &str,
     is_last: bool,
     printed: &mut std::collections::HashSet<String>,
+    resolved: &HashMap<String, ResourceFields>,
 ) {
     let connector = if prefix.is_empty() {
         ""
@@ -207,6 +291,13 @@ fn format_tree_node(
         "├── "
     };
 
+    let facts_tag = resolved
+        .get(name)
+        .map(|f| format_facts(&f.facts))
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("[{}] ", s))
+        .unwrap_or_default();
+
     let desc = dag
         .get_node(name)
         .and_then(|n| n.description.as_deref())
@@ -214,18 +305,17 @@ fn format_tree_node(
 
     let display = shorten_name(name);
 
-    // If already printed (diamond merge), show a back-reference
     if !printed.insert(name.to_string()) {
         out.push_str(&format!(
-            "{}{}{} (→ see above)\n",
-            prefix, connector, display
+            "{}{}{}{} (→ see above)\n",
+            prefix, connector, facts_tag, display
         ));
         return;
     }
 
     out.push_str(&format!(
-        "{}{}{} {}\n",
-        prefix, connector, display, desc
+        "{}{}{}{} {}\n",
+        prefix, connector, facts_tag, display, desc
     ));
 
     let mut children: Vec<_> = dag.downstream_of(name);
@@ -241,7 +331,7 @@ fn format_tree_node(
 
     for (i, child) in children.iter().enumerate() {
         let last = i == children.len() - 1;
-        format_tree_node(out, dag, &child.name, &child_prefix, last, printed);
+        format_tree_node(out, dag, &child.name, &child_prefix, last, printed, resolved);
     }
 }
 

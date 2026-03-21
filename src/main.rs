@@ -52,7 +52,7 @@ fn main() -> Result<()> {
 
     // Handle graph command
     if matches!(&cli.command, Some(Command::Graph)) {
-        print!("{}", output::format_graph(&dag));
+        print!("{}", output::format_graph(&dag, &registry));
         return Ok(());
     }
 
