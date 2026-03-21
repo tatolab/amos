@@ -6,96 +6,6 @@ use std::process::Command;
 use crate::external_adapter::ExternalAdapter;
 use crate::parser::Node;
 
-/// Trust configuration for adapter auto-pull.
-pub struct TrustConfig {
-    pub allow: Vec<String>,
-    pub deny: Vec<String>,
-}
-
-impl TrustConfig {
-    /// Load trust config from .amosrc.toml. If no file or no [trust] section, allow nothing.
-    pub fn load(scan_root: &Path) -> Self {
-        let config_path = scan_root.join(".amosrc.toml");
-        let content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => return TrustConfig::default(),
-        };
-
-        let config = match content.parse::<toml::Table>() {
-            Ok(c) => c,
-            Err(_) => return TrustConfig::default(),
-        };
-
-        let trust = match config.get("trust").and_then(|v| v.as_table()) {
-            Some(t) => t,
-            None => return TrustConfig::default(),
-        };
-
-        let allow = trust
-            .get("allow")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let deny = trust
-            .get("deny")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        TrustConfig { allow, deny }
-    }
-
-    /// Check if a source URI is trusted.
-    /// Deny rules take precedence. Then allow rules are checked.
-    /// If no rules are configured, nothing is trusted (safe default).
-    pub fn is_trusted(&self, source: &str) -> bool {
-        // Deny takes precedence
-        for pattern in &self.deny {
-            if matches_glob(source, pattern) {
-                return false;
-            }
-        }
-
-        // Check allow
-        for pattern in &self.allow {
-            if matches_glob(source, pattern) {
-                return true;
-            }
-        }
-
-        // No matching rule — not trusted
-        false
-    }
-}
-
-impl Default for TrustConfig {
-    fn default() -> Self {
-        TrustConfig {
-            allow: Vec::new(),
-            deny: Vec::new(),
-        }
-    }
-}
-
-/// Simple glob matching: `*` at the end matches anything.
-/// `@github:openclaw/*` matches `@github:openclaw/amos-adapters#figma`.
-fn matches_glob(value: &str, pattern: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        value.starts_with(prefix)
-    } else {
-        value == pattern
-    }
-}
-
 /// Collect all adapter declarations from parsed nodes.
 /// Returns a deduplicated map of scheme → source URI.
 pub fn collect_adapter_declarations(nodes: &[Node]) -> HashMap<String, String> {
@@ -260,7 +170,7 @@ fn find_executable(dir: &Path, original_path: &str) -> Result<PathBuf> {
     bail!("no executable found in adapter at {}", dir.display());
 }
 
-/// Build external adapters from node declarations, respecting trust config.
+/// Build external adapters from node declarations.
 /// Returns a list of (scheme, ExternalAdapter) pairs ready to register.
 ///
 /// - `builtin` source = skip (use the built-in adapter)
@@ -268,7 +178,6 @@ fn find_executable(dir: &Path, original_path: &str) -> Result<PathBuf> {
 /// - `@github:...` source on a new scheme = pull and register
 pub fn build_declared_adapters(
     nodes: &[Node],
-    trust: &TrustConfig,
 ) -> Vec<(String, ExternalAdapter)> {
     let declarations = collect_adapter_declarations(nodes);
     let mut adapters = Vec::new();
@@ -276,15 +185,6 @@ pub fn build_declared_adapters(
     for (scheme, source) in declarations {
         // "builtin" means use the built-in — nothing to pull
         if source == "builtin" {
-            continue;
-        }
-
-        // Check trust
-        if !trust.is_trusted(&source) {
-            eprintln!(
-                "amos: skipping untrusted adapter '{}' from {} (add to [trust].allow in .amosrc.toml)",
-                scheme, source
-            );
             continue;
         }
 
@@ -325,41 +225,3 @@ fn executable_command(path: &Path) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_trust_config_default_denies() {
-        let trust = TrustConfig::default();
-        assert!(!trust.is_trusted("@github:someone/repo#adapter"));
-    }
-
-    #[test]
-    fn test_trust_config_allow() {
-        let trust = TrustConfig {
-            allow: vec!["@github:openclaw/*".to_string()],
-            deny: Vec::new(),
-        };
-        assert!(trust.is_trusted("@github:openclaw/amos-adapters#figma"));
-        assert!(!trust.is_trusted("@github:random/repo#adapter"));
-    }
-
-    #[test]
-    fn test_trust_config_deny_overrides_allow() {
-        let trust = TrustConfig {
-            allow: vec!["@github:openclaw/*".to_string()],
-            deny: vec!["@github:openclaw/untrusted*".to_string()],
-        };
-        assert!(trust.is_trusted("@github:openclaw/amos-adapters#figma"));
-        assert!(!trust.is_trusted("@github:openclaw/untrusted-repo#adapter"));
-    }
-
-    #[test]
-    fn test_matches_glob() {
-        assert!(matches_glob("@github:openclaw/foo", "@github:openclaw/*"));
-        assert!(!matches_glob("@github:other/foo", "@github:openclaw/*"));
-        assert!(matches_glob("@github:openclaw/foo", "@github:openclaw/foo"));
-        assert!(!matches_glob("@github:openclaw/foo", "@github:openclaw/bar"));
-    }
-}
