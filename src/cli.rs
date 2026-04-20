@@ -12,6 +12,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub dir: Option<PathBuf>,
 
+    /// Emit machine-readable JSON on stdout instead of human-readable text.
+    /// Works with `milestones`, `next`, `blocked`, `orphans`, `focus`,
+    /// `validate`, and `show`. Other commands ignore it.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

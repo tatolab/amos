@@ -11,37 +11,48 @@ argument-hint: "<milestone-title> | --clear | (no args → print current)"
 allowed-tools: Bash
 ---
 
+Use `--json` for machine-readable output; parse with `jq`. Then craft a
+natural-language confirmation for the user — don't echo raw JSON.
+
 ```bash
-"$HOME/.local/bin/amos" focus "<milestone title>"
-"$HOME/.local/bin/amos" focus --clear
-"$HOME/.local/bin/amos" focus              # print current
+"$HOME/.local/bin/amos" focus "<milestone title>" --json
+"$HOME/.local/bin/amos" focus --clear --json
+"$HOME/.local/bin/amos" focus --json              # read current
 ```
 
-Focus is stored in `.amosrc.toml` at the scan root — persistent across
-sessions. Scopes `amos next`, `amos blocked`, `amos orphans`, and (future)
-`amos graph --focused` to items in that milestone.
+## JSON shapes
+
+- Set: `{"focus": "<title>", "action": "set"}`
+- Clear: `{"focus": null, "action": "cleared"}`
+- Read: `{"focus": "<title>" | null}`
+
+Extract with `jq -r '.focus'`.
 
 ## When to use
 
-- "Let's work on GPU Capability Rewrite" → `amos focus "GPU Capability Rewrite"`
-- "What milestone am I on?" → `amos focus` (no args)
-- "Clear focus, show me everything" → `amos focus --clear`
+- "Let's work on GPU Capability Rewrite" → set
+- "What milestone am I on?" → read (no args)
+- "Clear focus, show me everything" → clear
 
 ## Discovering milestone titles
 
-If the user doesn't know the exact title, list them first:
+If the user doesn't know the exact title:
 
 ```bash
-"$HOME/.local/bin/amos" milestones
+"$HOME/.local/bin/amos" milestones --json | jq -r '.milestones[].title'
 ```
 
-Prints every milestone the adapter knows about with open/closed counts and a
-`*` marker on the currently focused one. Then feed the exact string back to
-`amos focus "<title>"`.
+Pick the one that matches, then feed the exact string back to `amos focus`.
 
-## Interaction with `amos next`
+## Presenting the result
 
-Once focused, `amos next` only returns ready-to-start nodes **in that
-milestone**. If the milestone has nothing ready (e.g. all remaining items are
-blocked by each other or by closed adapter nodes), `amos next` exits with a
-helpful message naming the focused milestone.
+After running the command, craft a short confirmation in natural language.
+Example for a set:
+
+> Focused on **GPU Capability Rewrite**. `/amos:next` will now surface
+> only ready tasks from this milestone.
+
+For a read with `focus: null`:
+
+> No milestone currently focused. Run `/amos:next` and I'll rank the
+> candidates for you.
