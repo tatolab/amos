@@ -33,6 +33,71 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Handle migrate command (runs before parsing into nodes — works on
+    // legacy frontmatter that the parser might not accept cleanly).
+    if let Some(Command::Migrate { dry_run }) = &cli.command {
+        let report = amos::migrate::migrate_tree(&scan_root, *dry_run)
+            .context("running migrate")?;
+        print_migration_report(&report, *dry_run);
+        return Ok(());
+    }
+
+    // Handle rename command. Runs on raw files — doesn't require parse.
+    if let Some(Command::Rename { old_name, new_name, dry_run }) = &cli.command {
+        let report = amos::rename::rename_tree(&scan_root, old_name, new_name, *dry_run)
+            .context("running rename")?;
+        if *dry_run {
+            println!("# Rename dry-run (no files written)");
+        } else {
+            println!("# Rename report");
+        }
+        println!();
+        println!("{}", report.summary());
+        return Ok(());
+    }
+
+    // Status-mutation commands operate on `.amos-status` directly and don't
+    // need a full scan/parse.
+    match &cli.command {
+        Some(Command::Done { node }) => {
+            let mut sf = amos::status::StatusFile::load(&scan_root)?;
+            sf.set(node, amos::status::Status::Done);
+            sf.save()?;
+            eprintln!("amos: marked '{}' done", node);
+            return Ok(());
+        }
+        Some(Command::Start { node }) => {
+            let mut sf = amos::status::StatusFile::load(&scan_root)?;
+            sf.set(node, amos::status::Status::InProgress);
+            sf.save()?;
+            eprintln!("amos: marked '{}' in-progress", node);
+            return Ok(());
+        }
+        Some(Command::Reset { node }) => {
+            let mut sf = amos::status::StatusFile::load(&scan_root)?;
+            sf.remove(node);
+            sf.save()?;
+            eprintln!("amos: reset '{}' to pending", node);
+            return Ok(());
+        }
+        Some(Command::Focus { milestone, clear }) => {
+            if *clear {
+                amos::amosrc::write_focus(&scan_root, None)?;
+                eprintln!("amos: cleared focused milestone");
+            } else if let Some(m) = milestone {
+                amos::amosrc::write_focus(&scan_root, Some(m))?;
+                eprintln!("amos: focused on milestone '{}'", m);
+            } else {
+                match amos::amosrc::read_focus(&scan_root)? {
+                    Some(m) => println!("{}", m),
+                    None => eprintln!("amos: no milestone currently focused"),
+                }
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Scan + parse
     let blocks = scanner::scan_directory(&scan_root)
         .with_context(|| format!("scanning {}", scan_root.display()))?;
@@ -52,13 +117,212 @@ fn main() -> Result<()> {
 
     // Handle graph command
     if matches!(&cli.command, Some(Command::Graph)) {
-        print!("{}", output::format_graph(&dag, &registry));
+        print!("{}", output::format_graph(&dag, &registry, &scan_root));
         return Ok(());
     }
 
     // Handle show command
     if let Some(Command::Show { node }) = &cli.command {
         print!("{}", output::format_node(&dag, node, &registry));
+        return Ok(());
+    }
+
+    // Handle validate command
+    if matches!(&cli.command, Some(Command::Validate)) {
+        let issues = dag.validate(&scan_root);
+        if issues.is_empty() {
+            eprintln!("amos: DAG clean — {} nodes, no issues", dag.all_nodes().len());
+            return Ok(());
+        }
+        println!("## Issues");
+        println!();
+        for issue in &issues {
+            println!("- {}", issue);
+        }
+        std::process::exit(1);
+    }
+
+    // Filter commands (next / blocked / orphans). All load the status file
+    // so blocker completeness is computed against the user's local state.
+    if matches!(
+        &cli.command,
+        Some(Command::Next) | Some(Command::Blocked) | Some(Command::Orphans)
+    ) {
+        let status_file = amos::status::StatusFile::load(&scan_root)?;
+        let is_done = |name: &str| {
+            status_file.get(name) == amos::status::Status::Done
+        };
+
+        // If a milestone is focused, pull adapter facts so we can scope
+        // results to that milestone. Adapter state (closed/milestone) takes
+        // precedence over .amos-status because the latter can drift.
+        let focus = amos::amosrc::read_focus(&scan_root)?;
+        let adapter_facts: std::collections::HashMap<String, amos::adapter::ResourceFields> =
+            if focus.is_some() {
+                let names: Vec<&str> = dag
+                    .all_nodes()
+                    .iter()
+                    .filter(|n| registry.is_resolvable(&n.name))
+                    .map(|n| n.name.as_str())
+                    .collect();
+                registry.resolve_batch(&names).unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
+            };
+        let in_focused_milestone = |name: &str| -> bool {
+            let Some(ref focused) = focus else { return true };
+            match adapter_facts.get(name) {
+                Some(fields) => fields
+                    .facts
+                    .get("milestone")
+                    .map(|m| m == focused)
+                    .unwrap_or(false),
+                None => false,
+            }
+        };
+        let adapter_closed = |name: &str| -> bool {
+            adapter_facts
+                .get(name)
+                .and_then(|f| f.facts.get("state"))
+                .map(|s| s.eq_ignore_ascii_case("CLOSED"))
+                .unwrap_or(false)
+        };
+
+        let mut matching: Vec<&amos::parser::Node> = Vec::new();
+        for node in dag.all_nodes() {
+            if !in_focused_milestone(&node.name) {
+                continue;
+            }
+            // Trust adapter state over .amos-status when available.
+            if adapter_closed(&node.name) {
+                continue;
+            }
+            match &cli.command {
+                Some(Command::Next) => {
+                    if is_done(&node.name) {
+                        continue;
+                    }
+                    let blockers = dag.blocked_by_of(&node.name);
+                    let all_satisfied = blockers.iter().all(|b| {
+                        is_done(&b.name) || adapter_closed(&b.name)
+                    });
+                    if all_satisfied {
+                        matching.push(node);
+                    }
+                }
+                Some(Command::Blocked) => {
+                    if is_done(&node.name) {
+                        continue;
+                    }
+                    let blockers = dag.blocked_by_of(&node.name);
+                    let any_open = blockers.iter().any(|b| {
+                        !is_done(&b.name) && !adapter_closed(&b.name)
+                    });
+                    if any_open {
+                        matching.push(node);
+                    }
+                }
+                Some(Command::Orphans) => {
+                    if dag.blocked_by_of(&node.name).is_empty()
+                        && dag.blocks_of(&node.name).is_empty()
+                        && dag.related_of(&node.name).is_empty()
+                    {
+                        matching.push(node);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        matching.sort_by(|a, b| {
+            amos::output::numeric_aware_cmp(&a.name, &b.name)
+        });
+        for node in &matching {
+            let desc = node.description.as_deref().unwrap_or("");
+            if desc.is_empty() {
+                println!("- {}", node.name);
+            } else {
+                println!("- {} — {}", node.name, desc);
+            }
+        }
+        if matching.is_empty() {
+            if let Some(ref f) = focus {
+                eprintln!("amos: no matching nodes in focused milestone '{}'", f);
+            } else {
+                eprintln!("amos: no matching nodes");
+            }
+        }
+        return Ok(());
+    }
+
+    // Milestones listing — per-milestone open/closed/ready counts pulled from
+    // the adapter. "Ready" means an open node whose blocked_by set is fully
+    // done (via .amos-status) or closed (via adapter state).
+    if matches!(&cli.command, Some(Command::Milestones)) {
+        let names: Vec<&str> = dag
+            .all_nodes()
+            .iter()
+            .filter(|n| registry.is_resolvable(&n.name))
+            .map(|n| n.name.as_str())
+            .collect();
+        let adapter_facts = registry.resolve_batch(&names).unwrap_or_default();
+        let status_file = amos::status::StatusFile::load(&scan_root)?;
+        let current_focus = amos::amosrc::read_focus(&scan_root)?;
+
+        let is_closed = |node_name: &str| -> bool {
+            adapter_facts
+                .get(node_name)
+                .and_then(|f| f.facts.get("state"))
+                .map(|s| s.eq_ignore_ascii_case("CLOSED"))
+                .unwrap_or(false)
+        };
+        let is_done_or_closed = |node_name: &str| -> bool {
+            if is_closed(node_name) {
+                return true;
+            }
+            status_file.get(node_name) == amos::status::Status::Done
+        };
+
+        // title -> (open, closed, ready)
+        let mut milestone_counts: std::collections::BTreeMap<String, (usize, usize, usize)> =
+            std::collections::BTreeMap::new();
+        for (node_name, fields) in adapter_facts.iter() {
+            let Some(ms) = fields.facts.get("milestone") else { continue };
+            let state = fields
+                .facts
+                .get("state")
+                .map(|s| s.as_str())
+                .unwrap_or("OPEN");
+            let entry = milestone_counts.entry(ms.clone()).or_default();
+            if state.eq_ignore_ascii_case("CLOSED") {
+                entry.1 += 1;
+                continue;
+            }
+            entry.0 += 1;
+            // Ready = all blockers satisfied.
+            let blockers = dag.blocked_by_of(node_name);
+            let all_satisfied = blockers.iter().all(|b| is_done_or_closed(&b.name));
+            if all_satisfied {
+                entry.2 += 1;
+            }
+        }
+        if milestone_counts.is_empty() {
+            eprintln!("amos: no milestones found in adapter data");
+            return Ok(());
+        }
+        println!("{:2}{:50}  {:>6}  {:>6}  {:>6}", "", "milestone", "open", "ready", "done");
+        for (title, (open, closed, ready)) in milestone_counts {
+            let marker = if current_focus.as_deref() == Some(title.as_str()) {
+                "* "
+            } else {
+                "  "
+            };
+            let label = format!("\"{}\"", title);
+            println!(
+                "{}{:50}  {:>6}  {:>6}  {:>6}",
+                marker, label, open, ready, closed
+            );
+        }
         return Ok(());
     }
 
@@ -107,6 +371,48 @@ fn build_registry(scan_root: &std::path::Path, nodes: &[amos::parser::Node]) -> 
     }
 
     registry
+}
+
+/// Print a human-readable summary of a migration run.
+fn print_migration_report(report: &amos::migrate::MigrationReport, dry_run: bool) {
+    use amos::migrate::FileChange;
+
+    if dry_run {
+        println!("# Migration dry-run (no files written)");
+    } else {
+        println!("# Migration report");
+    }
+    println!();
+    println!("{}", report.summary());
+    println!();
+
+    let mut migrated: Vec<&amos::migrate::FileReport> = report
+        .files
+        .iter()
+        .filter(|r| r.kind == FileChange::Migrated)
+        .collect();
+    migrated.sort_by(|a, b| a.path.cmp(&b.path));
+
+    if migrated.is_empty() {
+        println!("No files needed migration.");
+        return;
+    }
+
+    println!("## Files migrated");
+    println!();
+    for r in &migrated {
+        let status_note = match r.status_moved {
+            Some(s) => format!(" status→.amos-status({:?})", s),
+            None => String::new(),
+        };
+        println!(
+            "- {}  (+{} blocked_by, +{} blocks{})",
+            r.path.display(),
+            r.blocked_by_added,
+            r.blocks_added,
+            status_note
+        );
+    }
 }
 
 /// Build a minimal registry with just built-in adapters.

@@ -7,13 +7,33 @@ use std::collections::HashMap;
 
 use crate::parser::Node;
 
+/// The kind of relationship an edge represents.
+///
+/// The DAG stores multiple concurrent relationship types. Queries filter by
+/// kind so blocker analyses can walk Blocks edges independently of associative
+/// markers like Related / Duplicates / Supersedes.
+///
+/// There is intentionally no hierarchical `Parent` edge — grouping is tied to
+/// GitHub milestones, not to a parallel notion in amos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeKind {
+    /// Temporal: source blocks target (target waits on source).
+    Blocks,
+    /// Soft association; stored both directions to keep queries symmetric.
+    Related,
+    /// Source duplicates target (target is canonical).
+    Duplicates,
+    /// Source has been replaced by target.
+    Supersedes,
+}
+
 /// The dependency DAG built from parsed nodes.
 ///
-/// Pure data structure — stores the graph of nodes and edges.
+/// Pure data structure — stores the graph of nodes and typed edges.
 /// No status interpretation. Adapters provide facts on demand,
 /// the consuming agent reasons about them.
 pub struct Dag {
-    pub graph: DiGraph<Node, ()>,
+    pub graph: DiGraph<Node, EdgeKind>,
     pub name_to_index: HashMap<String, NodeIndex>,
 }
 
@@ -66,7 +86,7 @@ impl std::fmt::Display for DagIssue {
 impl Dag {
     /// Build a DAG from parsed nodes.
     pub fn build(nodes: Vec<Node>) -> Result<Self> {
-        let mut graph = DiGraph::new();
+        let mut graph: DiGraph<Node, EdgeKind> = DiGraph::new();
         let mut name_to_index: HashMap<String, NodeIndex> = HashMap::new();
 
         // Add all nodes first
@@ -83,34 +103,58 @@ impl Dag {
             name_to_index.insert(node.name.clone(), idx);
         }
 
-        // Add edges (deduplicated — both sides may declare the same relationship)
-        // Edge direction: upstream -> downstream (upstream must complete first)
-        // So if B has `up:A`, edge is A -> B
-        // If A has `down:B`, edge is also A -> B
-        let mut added_edges: std::collections::HashSet<(NodeIndex, NodeIndex)> =
+        // Deduplicate by (source, target, kind) — a node may be reachable by
+        // declaration from either side (e.g. parent declares `children: [B]`
+        // and B declares `parent: A`), but we only want one edge per relation.
+        let mut added_edges: std::collections::HashSet<(NodeIndex, NodeIndex, EdgeKind)> =
             std::collections::HashSet::new();
+
+        let mut add_edge = |graph: &mut DiGraph<Node, EdgeKind>,
+                            from: NodeIndex,
+                            to: NodeIndex,
+                            kind: EdgeKind| {
+            if added_edges.insert((from, to, kind)) {
+                graph.add_edge(from, to, kind);
+            }
+        };
 
         for node in &nodes {
             let node_idx = name_to_index[&node.name];
 
-            for upstream_name in &node.upstream {
-                if let Some(&upstream_idx) = name_to_index.get(upstream_name) {
-                    let edge = (upstream_idx, node_idx);
-                    if added_edges.insert(edge) {
-                        graph.add_edge(upstream_idx, node_idx, ());
-                    }
+            // --- Blocks edges: source blocks target ---
+            for blocker_name in &node.blocked_by {
+                if let Some(&blocker_idx) = name_to_index.get(blocker_name) {
+                    add_edge(&mut graph, blocker_idx, node_idx, EdgeKind::Blocks);
                 }
-                // Missing deps are handled in validate(), not here
+            }
+            for blocked_name in &node.blocks {
+                if let Some(&blocked_idx) = name_to_index.get(blocked_name) {
+                    add_edge(&mut graph, node_idx, blocked_idx, EdgeKind::Blocks);
+                }
             }
 
-            for downstream_name in &node.downstream {
-                if let Some(&downstream_idx) = name_to_index.get(downstream_name) {
-                    let edge = (node_idx, downstream_idx);
-                    if added_edges.insert(edge) {
-                        graph.add_edge(node_idx, downstream_idx, ());
-                    }
+            // --- Related: symmetric, stored both directions ---
+            for related_name in &node.related_to {
+                if let Some(&related_idx) = name_to_index.get(related_name) {
+                    add_edge(&mut graph, node_idx, related_idx, EdgeKind::Related);
+                    add_edge(&mut graph, related_idx, node_idx, EdgeKind::Related);
                 }
             }
+
+            // --- Duplicates: source duplicates target (target is canonical) ---
+            if let Some(dup_name) = &node.duplicates {
+                if let Some(&dup_idx) = name_to_index.get(dup_name) {
+                    add_edge(&mut graph, node_idx, dup_idx, EdgeKind::Duplicates);
+                }
+            }
+
+            // --- Supersedes: source has been replaced by target ---
+            if let Some(sup_name) = &node.superseded_by {
+                if let Some(&sup_idx) = name_to_index.get(sup_name) {
+                    add_edge(&mut graph, node_idx, sup_idx, EdgeKind::Supersedes);
+                }
+            }
+
         }
 
         Ok(Dag {
@@ -239,27 +283,23 @@ impl Dag {
             issues.push(DagIssue::CycleDetected);
         }
 
-        // Check for missing dependencies
+        // Check for missing dependencies across every typed relationship field.
         for idx in self.graph.node_indices() {
             let node = &self.graph[idx];
 
-            for dep in &node.upstream {
+            let mut check = |dep: &String| {
                 if !self.name_to_index.contains_key(dep) {
                     issues.push(DagIssue::MissingDependency {
                         from_node: node.name.clone(),
                         missing_dep: dep.clone(),
                     });
                 }
-            }
-
-            for dep in &node.downstream {
-                if !self.name_to_index.contains_key(dep) {
-                    issues.push(DagIssue::MissingDependency {
-                        from_node: node.name.clone(),
-                        missing_dep: dep.clone(),
-                    });
-                }
-            }
+            };
+            for dep in &node.blocked_by { check(dep); }
+            for dep in &node.blocks { check(dep); }
+            for dep in &node.related_to { check(dep); }
+            if let Some(dep) = &node.duplicates { check(dep); }
+            if let Some(dep) = &node.superseded_by { check(dep); }
 
             // Check local file context references
             for ctx in &node.context {
@@ -286,7 +326,7 @@ impl Dag {
             .collect()
     }
 
-    /// Get upstream neighbors of a node.
+    /// Get upstream neighbors across all edge kinds.
     pub fn upstream_of(&self, name: &str) -> Vec<&Node> {
         let Some(&idx) = self.name_to_index.get(name) else {
             return Vec::new();
@@ -297,7 +337,7 @@ impl Dag {
             .collect()
     }
 
-    /// Get downstream neighbors of a node.
+    /// Get downstream neighbors across all edge kinds.
     pub fn downstream_of(&self, name: &str) -> Vec<&Node> {
         let Some(&idx) = self.name_to_index.get(name) else {
             return Vec::new();
@@ -307,6 +347,59 @@ impl Dag {
             .map(|edge| &self.graph[edge.target()])
             .collect()
     }
+
+    /// Generic neighbor lookup: neighbors reachable via edges of `kind` in
+    /// `direction`. All kind-specific helpers below are thin wrappers.
+    fn neighbors_by_kind(
+        &self,
+        name: &str,
+        kind: EdgeKind,
+        direction: Direction,
+    ) -> Vec<&Node> {
+        let Some(&idx) = self.name_to_index.get(name) else {
+            return Vec::new();
+        };
+        self.graph
+            .edges_directed(idx, direction)
+            .filter(|edge| *edge.weight() == kind)
+            .map(|edge| {
+                let neighbor = match direction {
+                    Direction::Outgoing => edge.target(),
+                    Direction::Incoming => edge.source(),
+                };
+                &self.graph[neighbor]
+            })
+            .collect()
+    }
+
+    /// Nodes this node blocks (outgoing Blocks edges).
+    pub fn blocks_of(&self, name: &str) -> Vec<&Node> {
+        self.neighbors_by_kind(name, EdgeKind::Blocks, Direction::Outgoing)
+    }
+
+    /// Nodes blocking this node (incoming Blocks edges).
+    pub fn blocked_by_of(&self, name: &str) -> Vec<&Node> {
+        self.neighbors_by_kind(name, EdgeKind::Blocks, Direction::Incoming)
+    }
+
+    /// Nodes softly related to this one (outgoing Related edges; symmetric).
+    pub fn related_of(&self, name: &str) -> Vec<&Node> {
+        self.neighbors_by_kind(name, EdgeKind::Related, Direction::Outgoing)
+    }
+
+    /// Canonical node this one duplicates (outgoing Duplicates edge).
+    pub fn duplicates_of(&self, name: &str) -> Option<&Node> {
+        self.neighbors_by_kind(name, EdgeKind::Duplicates, Direction::Outgoing)
+            .into_iter()
+            .next()
+    }
+
+    /// Node that supersedes this one (outgoing Supersedes edge).
+    pub fn superseded_by_of(&self, name: &str) -> Option<&Node> {
+        self.neighbors_by_kind(name, EdgeKind::Supersedes, Direction::Outgoing)
+            .into_iter()
+            .next()
+    }
 }
 
 #[cfg(test)]
@@ -315,12 +408,17 @@ mod tests {
     use crate::parser::Node;
     use std::path::PathBuf;
 
-    fn make_node(name: &str, upstream: Vec<&str>, downstream: Vec<&str>) -> Node {
+    fn make_node(name: &str, blocked_by: Vec<&str>, blocks: Vec<&str>) -> Node {
         Node {
             name: name.to_string(),
             description: None,
-            upstream: upstream.into_iter().map(String::from).collect(),
-            downstream: downstream.into_iter().map(String::from).collect(),
+            blocked_by: blocked_by.into_iter().map(String::from).collect(),
+            blocks: blocks.into_iter().map(String::from).collect(),
+            related_to: Vec::new(),
+            duplicates: None,
+            superseded_by: None,
+            labels: Vec::new(),
+            priority: None,
             context: Vec::new(),
             adapters: std::collections::HashMap::new(),
             source_file: PathBuf::from("test.md"),
@@ -387,5 +485,57 @@ mod tests {
         let dag = Dag::build(nodes).unwrap();
         let issues = dag.validate(std::path::Path::new("/tmp"));
         assert!(issues.iter().any(|i| matches!(i, DagIssue::MissingDependency { .. })));
+    }
+
+    #[test]
+    fn test_blocks_edges() {
+        let mut a = make_node("a", vec![], vec![]);
+        a.blocks = vec!["b".to_string()];
+        let nodes = vec![a, make_node("b", vec![], vec![])];
+        let dag = Dag::build(nodes).unwrap();
+
+        assert_eq!(dag.blocks_of("a").len(), 1);
+        assert_eq!(dag.blocked_by_of("b").len(), 1);
+    }
+
+    #[test]
+    fn test_related_is_symmetric() {
+        let mut a = make_node("a", vec![], vec![]);
+        a.related_to = vec!["b".to_string()];
+        let nodes = vec![a, make_node("b", vec![], vec![])];
+        let dag = Dag::build(nodes).unwrap();
+
+        assert_eq!(dag.related_of("a").len(), 1);
+        assert_eq!(dag.related_of("b").len(), 1); // stored both directions
+    }
+
+    #[test]
+    fn test_duplicates_and_supersedes() {
+        let mut a = make_node("a", vec![], vec![]);
+        a.duplicates = Some("canonical".to_string());
+        let mut b = make_node("b", vec![], vec![]);
+        b.superseded_by = Some("new-version".to_string());
+        let nodes = vec![
+            a,
+            b,
+            make_node("canonical", vec![], vec![]),
+            make_node("new-version", vec![], vec![]),
+        ];
+        let dag = Dag::build(nodes).unwrap();
+
+        assert_eq!(dag.duplicates_of("a").map(|n| n.name.as_str()), Some("canonical"));
+        assert_eq!(dag.superseded_by_of("b").map(|n| n.name.as_str()), Some("new-version"));
+    }
+
+    #[test]
+    fn test_legacy_down_creates_blocks_edge() {
+        let nodes = vec![
+            make_node("a", vec![], vec!["b"]),
+            make_node("b", vec![], vec![]),
+        ];
+        let dag = Dag::build(nodes).unwrap();
+
+        assert_eq!(dag.blocks_of("a").len(), 1);
+        assert_eq!(dag.blocked_by_of("b").len(), 1);
     }
 }

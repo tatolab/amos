@@ -40,7 +40,7 @@ impl GhAdapter {
     fn fetch_issue(&self, repo: Option<&str>, number: u64) -> Result<IssueData> {
         let mut cmd = Command::new("gh");
         cmd.args(["issue", "view", &number.to_string()]);
-        cmd.args(["--json", "title,body,state,labels,comments"]);
+        cmd.args(["--json", "title,body,state,labels,comments,milestone"]);
 
         if let Some(r) = repo {
             cmd.args(["--repo", r]);
@@ -79,6 +79,8 @@ impl GhAdapter {
             })
             .unwrap_or_default();
 
+        let milestone = json["milestone"]["title"].as_str().map(String::from);
+
         Ok(IssueData {
             title: json["title"].as_str().unwrap_or("").to_string(),
             body: json["body"].as_str().unwrap_or("").to_string(),
@@ -92,6 +94,7 @@ impl GhAdapter {
                 })
                 .unwrap_or_default(),
             comments,
+            milestone,
         })
     }
 
@@ -193,6 +196,7 @@ struct IssueData {
     state: String,
     labels: Vec<String>,
     comments: Vec<Comment>,
+    milestone: Option<String>,
 }
 
 impl IssueData {
@@ -202,6 +206,9 @@ impl IssueData {
         facts.insert("state".to_string(), self.state.clone());
         if !self.labels.is_empty() {
             facts.insert("labels".to_string(), self.labels.join(", "));
+        }
+        if let Some(ms) = &self.milestone {
+            facts.insert("milestone".to_string(), ms.clone());
         }
         facts
     }
