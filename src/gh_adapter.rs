@@ -169,6 +169,108 @@ impl GhAdapter {
             return Ok(HashMap::new());
         }
 
+        // Single paginated API call — massively faster than N individual
+        // `gh issue view` calls. A scan over 80 issues goes from ~2 minutes
+        // to a couple of seconds. We fetch state=all so both open and
+        // closed issues land in the map; the caller filters as needed.
+        let repo_str = match repo.or(self.default_repo.as_deref()) {
+            Some(r) => r.to_string(),
+            None => return self.fetch_issues_batch_sequential(repo, numbers),
+        };
+
+        let mut cmd = Command::new("gh");
+        cmd.args([
+            "api",
+            "--paginate",
+            "-H",
+            "Accept: application/vnd.github+json",
+            &format!("repos/{}/issues?state=all&per_page=100", repo_str),
+        ]);
+        let output = match cmd.output() {
+            Ok(o) if o.status.success() => o,
+            _ => {
+                return self.fetch_issues_batch_sequential(repo, numbers);
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let issues = parse_issue_pages(&stdout).unwrap_or_default();
+
+        let wanted: std::collections::HashSet<u64> = numbers.iter().copied().collect();
+        let mut results = HashMap::new();
+        for entry in issues {
+            let Some(number) = entry.get("number").and_then(|v| v.as_u64()) else { continue };
+            if !wanted.contains(&number) {
+                continue;
+            }
+            if entry.get("pull_request").is_some() {
+                continue;
+            }
+
+            let title = entry
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let body = entry
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let state = entry
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("OPEN")
+                .to_uppercase();
+            let labels = entry
+                .get("labels")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l.get("name").and_then(|v| v.as_str()).map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let milestone = entry
+                .get("milestone")
+                .and_then(|m| m.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            results.insert(
+                number,
+                IssueData {
+                    title,
+                    body,
+                    state,
+                    labels,
+                    comments: Vec::new(),
+                    milestone,
+                },
+            );
+        }
+
+        // Anything not found in the bulk response falls back to per-issue
+        // fetch.
+        let missing: Vec<u64> = numbers
+            .iter()
+            .copied()
+            .filter(|n| !results.contains_key(n))
+            .collect();
+        if !missing.is_empty() {
+            let extra = self.fetch_issues_batch_sequential(repo, &missing)?;
+            results.extend(extra);
+        }
+
+        Ok(results)
+    }
+
+    /// Original per-issue loop, kept as the fallback path.
+    fn fetch_issues_batch_sequential(
+        &self,
+        repo: Option<&str>,
+        numbers: &[u64],
+    ) -> Result<HashMap<u64, IssueData>> {
         let mut results = HashMap::new();
         for &num in numbers {
             match self.fetch_issue(repo, num) {
@@ -182,6 +284,31 @@ impl GhAdapter {
         }
         Ok(results)
     }
+}
+
+/// Parse the concatenated JSON that `gh api --paginate` emits. Normally a
+/// single top-level array; for multi-page results, potentially multiple arrays
+/// concatenated. Handles both shapes.
+fn parse_issue_pages(text: &str) -> Option<Vec<serde_json::Value>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+
+    if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(arr);
+    }
+
+    let mut out = Vec::new();
+    let de = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    for next in de {
+        match next {
+            Ok(serde_json::Value::Array(arr)) => out.extend(arr),
+            Ok(other) => out.push(other),
+            Err(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 struct Comment {
