@@ -12,10 +12,26 @@ pub struct Node {
     pub name: String,
     /// Plain-language description of the work.
     pub description: Option<String>,
-    /// Upstream dependencies (nodes this depends on).
-    pub upstream: Vec<String>,
-    /// Downstream dependents (nodes that depend on this).
-    pub downstream: Vec<String>,
+
+    // --- Typed relationships. ---
+    /// Nodes that must complete before this one can start.
+    pub blocked_by: Vec<String>,
+    /// Nodes that can't start until this one is done.
+    pub blocks: Vec<String>,
+    /// Soft associations — no ordering or gating.
+    pub related_to: Vec<String>,
+    /// This node duplicates another (that one is canonical).
+    pub duplicates: Option<String>,
+    /// This node has been replaced by another.
+    pub superseded_by: Option<String>,
+
+    // --- Attributes. ---
+    /// Free-form tags for filtering.
+    pub labels: Vec<String>,
+    /// Priority bucket.
+    pub priority: Option<Priority>,
+
+    // --- Existing fields. ---
     /// Context references (local files, @github:, @url:).
     pub context: Vec<ContextRef>,
     /// Adapter declarations — scheme → source URI for auto-pull.
@@ -26,6 +42,31 @@ pub struct Node {
     pub line_number: usize,
     /// Markdown body after the frontmatter block.
     pub body: String,
+}
+
+/// Priority bucket, ordered from highest (P0) to lowest (P3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+impl std::str::FromStr for Priority {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "p0" | "0" => Ok(Priority::P0),
+            "p1" | "1" => Ok(Priority::P1),
+            "p2" | "2" => Ok(Priority::P2),
+            "p3" | "3" => Ok(Priority::P3),
+            other => Err(format!(
+                "invalid priority '{}'; expected p0, p1, p2, or p3",
+                other
+            )),
+        }
+    }
 }
 
 /// A context reference pointing to a file or URL.
@@ -49,8 +90,25 @@ struct RawFrontmatter {
     whoami: String,
     name: String,
     description: Option<String>,
+
+    // Typed relationships.
     #[serde(default)]
-    dependencies: Vec<String>,
+    blocked_by: Vec<String>,
+    #[serde(default)]
+    blocks: Vec<String>,
+    #[serde(default)]
+    related_to: Vec<String>,
+    #[serde(default)]
+    duplicates: Option<String>,
+    #[serde(default)]
+    superseded_by: Option<String>,
+
+    // Attributes.
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    priority: Option<String>,
+
     #[serde(default)]
     context: Vec<String>,
     #[serde(default)]
@@ -59,6 +117,34 @@ struct RawFrontmatter {
 
 /// Parse a raw block into a Node.
 pub fn parse_block(block: &RawBlock) -> Result<Node> {
+    // Legacy-format detection: the old `dependencies:` list with up:/down:
+    // prefixes and the in-frontmatter `status:` field both moved out in
+    // favor of typed edges and `.amos-status`. Point users to the migration
+    // tool rather than silently dropping fields.
+    let raw: serde_yaml::Value = serde_yaml::from_str(&block.yaml).with_context(|| {
+        format!(
+            "parsing YAML at {}:{}",
+            block.source_file.display(),
+            block.line_number
+        )
+    })?;
+    if let Some(map) = raw.as_mapping() {
+        if map.contains_key("dependencies") {
+            bail!(
+                "legacy `dependencies:` field in {}:{} — run `amos migrate` to convert to typed edges (blocked_by:/blocks:)",
+                block.source_file.display(),
+                block.line_number
+            );
+        }
+        if map.contains_key("status") {
+            bail!(
+                "legacy `status:` field in {}:{} — run `amos migrate` to move status entries into .amos-status",
+                block.source_file.display(),
+                block.line_number
+            );
+        }
+    }
+
     let frontmatter: RawFrontmatter =
         serde_yaml::from_str(&block.yaml).with_context(|| {
             format!(
@@ -85,24 +171,6 @@ pub fn parse_block(block: &RawBlock) -> Result<Node> {
         );
     }
 
-    let mut upstream = Vec::new();
-    let mut downstream = Vec::new();
-
-    for dep in &frontmatter.dependencies {
-        if let Some(name) = dep.strip_prefix("up:") {
-            upstream.push(name.trim().to_string());
-        } else if let Some(name) = dep.strip_prefix("down:") {
-            downstream.push(name.trim().to_string());
-        } else {
-            bail!(
-                "invalid dependency '{}' at {}:{} — must start with 'up:' or 'down:'",
-                dep,
-                block.source_file.display(),
-                block.line_number
-            );
-        }
-    }
-
     let context = frontmatter
         .context
         .iter()
@@ -116,11 +184,31 @@ pub fn parse_block(block: &RawBlock) -> Result<Node> {
             )
         })?;
 
+    let priority = frontmatter
+        .priority
+        .as_deref()
+        .map(|s| {
+            s.parse::<Priority>().map_err(|e| {
+                anyhow::anyhow!(
+                    "{} at {}:{}",
+                    e,
+                    block.source_file.display(),
+                    block.line_number
+                )
+            })
+        })
+        .transpose()?;
+
     Ok(Node {
         name: frontmatter.name,
         description: frontmatter.description,
-        upstream,
-        downstream,
+        blocked_by: frontmatter.blocked_by,
+        blocks: frontmatter.blocks,
+        related_to: frontmatter.related_to,
+        duplicates: frontmatter.duplicates,
+        superseded_by: frontmatter.superseded_by,
+        labels: frontmatter.labels,
+        priority,
         context,
         adapters: frontmatter.adapters,
         source_file: block.source_file.clone(),
@@ -194,7 +282,7 @@ description: First task"#,
     }
 
     #[test]
-    fn test_parse_dependencies() {
+    fn test_legacy_dependencies_errors_with_migrate_hint() {
         let block = make_block(
             r#"whoami: amos
 name: task-b
@@ -203,9 +291,22 @@ dependencies:
   - down:task-c"#,
             "",
         );
-        let node = parse_block(&block).unwrap();
-        assert_eq!(node.upstream, vec!["task-a"]);
-        assert_eq!(node.downstream, vec!["task-c"]);
+        let err = parse_block(&block).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("amos migrate"), "expected migrate hint: {}", msg);
+    }
+
+    #[test]
+    fn test_legacy_status_errors_with_migrate_hint() {
+        let block = make_block(
+            r#"whoami: amos
+name: task-a
+status: pending"#,
+            "",
+        );
+        let err = parse_block(&block).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("amos migrate"), "expected migrate hint: {}", msg);
     }
 
     #[test]
@@ -239,17 +340,8 @@ context:
         );
     }
 
-    #[test]
-    fn test_invalid_dependency_prefix() {
-        let block = make_block(
-            r#"whoami: amos
-name: task-a
-dependencies:
-  - invalid-dep"#,
-            "",
-        );
-        assert!(parse_block(&block).is_err());
-    }
+    // Legacy `dependencies:` now errors with a migrate hint; see
+    // test_legacy_dependencies_errors_with_migrate_hint for the new behavior.
 
     #[test]
     fn test_minimal_node() {
@@ -257,8 +349,86 @@ dependencies:
         let node = parse_block(&block).unwrap();
         assert_eq!(node.name, "task-a");
         assert!(node.description.is_none());
-        assert!(node.upstream.is_empty());
-        assert!(node.downstream.is_empty());
         assert!(node.context.is_empty());
+        assert!(node.blocked_by.is_empty());
+        assert!(node.blocks.is_empty());
+        assert!(node.related_to.is_empty());
+        assert!(node.labels.is_empty());
+        assert!(node.priority.is_none());
     }
+
+    #[test]
+    fn test_parse_typed_relationships() {
+        let block = make_block(
+            r#"whoami: amos
+name: "@github:tatolab/streamlib#326"
+blocked_by:
+  - "@github:tatolab/streamlib#325"
+  - "@github:tatolab/streamlib#369"
+blocks:
+  - "@github:tatolab/streamlib#999"
+related_to:
+  - "@github:tatolab/streamlib#888"
+duplicates: "@github:tatolab/streamlib#777"
+superseded_by: "@github:tatolab/streamlib#555""#,
+            "",
+        );
+        let node = parse_block(&block).unwrap();
+        assert_eq!(node.blocked_by.len(), 2);
+        assert_eq!(node.blocked_by[0], "@github:tatolab/streamlib#325");
+        assert_eq!(node.blocked_by[1], "@github:tatolab/streamlib#369");
+        assert_eq!(node.blocks, vec!["@github:tatolab/streamlib#999"]);
+        assert_eq!(node.related_to, vec!["@github:tatolab/streamlib#888"]);
+        assert_eq!(
+            node.duplicates.as_deref(),
+            Some("@github:tatolab/streamlib#777")
+        );
+        assert_eq!(
+            node.superseded_by.as_deref(),
+            Some("@github:tatolab/streamlib#555")
+        );
+    }
+
+    #[test]
+    fn test_parse_attributes() {
+        let block = make_block(
+            r#"whoami: amos
+name: task-a
+labels:
+  - refactor
+  - gpu
+priority: p2"#,
+            "",
+        );
+        let node = parse_block(&block).unwrap();
+        assert_eq!(node.labels, vec!["refactor", "gpu"]);
+        assert_eq!(node.priority, Some(Priority::P2));
+    }
+
+    #[test]
+    fn test_parse_priority_alternate_forms() {
+        for (raw, expected) in [
+            ("p0", Priority::P0),
+            ("P1", Priority::P1),
+            ("2", Priority::P2),
+            ("P3", Priority::P3),
+        ] {
+            let block = make_block(
+                &format!("whoami: amos\nname: t\npriority: \"{}\"", raw),
+                "",
+            );
+            let node = parse_block(&block).unwrap();
+            assert_eq!(node.priority, Some(expected), "failed for raw={}", raw);
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_priority_errors() {
+        let block = make_block(
+            "whoami: amos\nname: t\npriority: urgent",
+            "",
+        );
+        assert!(parse_block(&block).is_err());
+    }
+
 }
