@@ -83,20 +83,80 @@ download_or_build() {
   ok "built amos from source"
 }
 
-# Install Claude Code skills from the repo
+# Install Claude Code skills from the repo.
+#
+# Discovers the skill list dynamically from the GitHub contents API instead
+# of hardcoding it — that way new skills added to the repo are picked up
+# automatically on the next install. Also copies every file inside each skill
+# directory (SKILL.md plus any `references/` subdirectory), fixing a previous
+# bug where only SKILL.md was fetched and skills referencing `references/`
+# files shipped broken.
 install_skills() {
-  local skills_src="https://raw.githubusercontent.com/${REPO}/main/.claude/skills"
-  local skills=("amos" "amos-graph" "amos-show" "amos-notify" "amos-create")
+  local api_base="https://api.github.com/repos/${REPO}/contents/.claude/skills"
+  local raw_base="https://raw.githubusercontent.com/${REPO}/main/.claude/skills"
 
   info "installing Claude Code skills to ${DIM}${SKILLS_DIR}${RESET}"
+
+  local skills_json
+  skills_json="$(curl -fsSL -H "Accept: application/vnd.github+json" "$api_base" 2>/dev/null)" || {
+    echo -e "  ${RED}✗${RESET} failed to list skills from ${api_base}"
+    echo -e "  ${DIM}(are we rate-limited? try again in a minute)${RESET}"
+    return 1
+  }
+
+  # Extract skill directory names. Works without jq by parsing the JSON
+  # minimally — GitHub's contents API returns `{"name": "...", "type": "dir", ...}` entries.
+  local skills=()
+  while IFS= read -r skill; do
+    skills+=("$skill")
+  done < <(
+    printf '%s\n' "$skills_json" \
+      | grep -oE '"name": *"[^"]+"' \
+      | head -n 200 \
+      | awk -F'"' '{ print $4 }'
+  )
+
+  if [ ${#skills[@]} -eq 0 ]; then
+    echo -e "  ${DIM}no skills found at ${api_base}${RESET}"
+    return 0
+  fi
 
   for skill in "${skills[@]}"; do
     local dir="${SKILLS_DIR}/${skill}"
     mkdir -p "$dir"
-    if curl -fsSL -o "$dir/SKILL.md" "${skills_src}/${skill}/SKILL.md" 2>/dev/null; then
-      ok "  ${skill}"
+
+    # Fetch the skill's file listing recursively and download each blob.
+    local tree_json
+    tree_json="$(curl -fsSL -H "Accept: application/vnd.github+json" \
+      "${api_base}/${skill}?recursive=1" 2>/dev/null)" || {
+      echo -e "  ${DIM}skipped ${skill} (listing failed)${RESET}"
+      continue
+    }
+
+    # For each file entry, reconstruct its relative path and download.
+    local got_files=0
+    while IFS= read -r relpath; do
+      [ -z "$relpath" ] && continue
+      local target="${dir}/${relpath}"
+      mkdir -p "$(dirname "$target")"
+      if curl -fsSL -o "$target" "${raw_base}/${skill}/${relpath}" 2>/dev/null; then
+        got_files=$((got_files + 1))
+      fi
+    done < <(
+      printf '%s\n' "$tree_json" \
+        | grep -oE '"path": *"[^"]+"' \
+        | awk -F'"' '{ print $4 }'
+    )
+
+    if [ $got_files -gt 0 ]; then
+      ok "  ${skill} (${got_files} file$([ $got_files -ne 1 ] && echo s))"
     else
-      echo -e "  ${DIM}skipped ${skill} (not found)${RESET}"
+      # Fall back to just SKILL.md so a partial install still has something useful.
+      if curl -fsSL -o "${dir}/SKILL.md" "${raw_base}/${skill}/SKILL.md" 2>/dev/null; then
+        ok "  ${skill} (SKILL.md only)"
+      else
+        echo -e "  ${DIM}skipped ${skill} (not found)${RESET}"
+      fi
     fi
   done
 }
