@@ -13,184 +13,166 @@ allowed-tools: Bash
 # Task execution protocol — `/amos:next`
 
 You are executing the next ready-to-start issue from the focused milestone.
-The protocol below is authoritative — follow it in order.
+Prefer `--json` on every `amos` command; pipe through `jq` to extract fields;
+craft human-readable summaries for the user in natural language. Never echo
+raw JSON at the user.
 
 ## Prereqs
 
-- The project's `CLAUDE.md` has already been loaded into context — follow it.
+- The project's `CLAUDE.md` has already been loaded into context.
 
 ## Step 0 — Focus triage
 
-Check whether a milestone is currently focused and whether it still has
-actionable work:
-
 ```bash
-"$HOME/.local/bin/amos" focus --dir <project-root>        # prints current focus, or "no milestone currently focused"
-"$HOME/.local/bin/amos" milestones --dir <project-root>   # per-milestone open / ready / done counts
+"$HOME/.local/bin/amos" focus --json --dir <project-root>              # current focus
+"$HOME/.local/bin/amos" milestones --json --dir <project-root>         # per-milestone counts
 ```
 
-Handle these four cases:
+Four cases:
 
-**(a) No focus set.** Run `amos milestones`, present a ranked list of
-candidate milestones (see *Ranking* below), and wait for the user to pick
-via `/amos:focus "<title>"`. Do NOT pick for them.
+**(a) `focus: null`** → no milestone picked. List candidates (see
+*Ranking* below) and stop. User picks via `/amos:focus`.
 
-**(b) Focus is set but has `0 open`.** The milestone is done. Congratulate
-the user, suggest closing it in GitHub (`gh milestone close <number>` — use
-`gh api repos/<owner>/<repo>/milestones` to find the number), then present
-ranked candidates for the next milestone.
+**(b) Focused milestone has `open == 0`** → finished. Congratulate, tell
+the user to close it in GitHub (`gh milestone close <number>` — find
+number via `gh api repos/<owner>/<repo>/milestones`), and rank candidates
+for the next milestone.
 
-**(c) Focus is set, `open > 0` but `ready == 0`.** The milestone's remaining
-work is blocked. Run `amos blocked` to see the chain and, for each blocked
-item, its open blockers. Then either:
-- If the gating blocker is in another milestone, recommend `/amos:focus`
-  to that milestone so the user can unstick this one.
-- If the chain is internal, recommend the earliest blocker-free item (or
-  explain the circular/deadlocked case if any).
+**(c) Focus open > 0 but `ready == 0`** → blocked chain. Run
+`amos blocked --json` to show what's gating. For each blocked node, its
+`blocked_by` lists the open blockers. If any blocker is in a different
+milestone, recommend `/amos:focus` there. If the chain is internal,
+show it and stop.
 
-**(d) Focus is set, `ready >= 1`.** Continue to Step 1 below.
+**(d) `ready >= 1`** → continue to Step 1.
 
-## Ranking recommendations
+## Ranking recommendations (used in a/b)
 
-When proposing milestones, use this heuristic (sort descending):
+Parse `amos milestones --json` and filter open milestones. Rank:
 
-1. **Exclude** anything disqualified — milestones whose every open item is
-   labeled `frozen`, or whose description starts with `[BLOCKED` or contains
-   "do not start". Call these out separately as "deferred / blocked —
-   skipping."
-2. **Prefer** higher `ready / open` ratio — milestones where most open
-   items can start today.
-3. **Prefer** smaller `open` counts — a 1- or 2-item milestone closes fast
-   and gives a real deliverable.
-4. **Prefer** milestones whose items are `blocked_by` the focused milestone
-   not at all (i.e. standalone) or that unblock other milestones (items in
-   other milestones' `blocked_by` pointing at this one).
+1. **Exclude**: every node frozen (`labels_local` contains "frozen") OR
+   description starts with `[BLOCKED` or contains "do not start".
+2. **Prefer** high `ready / open` ratio.
+3. **Prefer** smaller `open` (faster close-out).
+4. **Prefer** milestones unblocking other milestones (peek at each
+   candidate's nodes' `blocks:` — targets that point into another open
+   milestone's ready items).
 5. **Tiebreak** alphabetical.
 
-Emit 3–5 candidates. For each, one line on why-to-start or why-to-defer.
-Conclude with: "Run `/amos:focus "<title>"` to pick one."
+Emit 3–5 candidates. For each, one line on *why start* / *why defer* in
+natural English. Conclude with: "Run `/amos:focus \"<title>\"` to pick
+one."
 
-## Step 1 — Find the next issue (inside the focused milestone)
+## Step 1 — Find the next issue
 
 ```bash
-"$HOME/.local/bin/amos" next --dir <project-root>
+"$HOME/.local/bin/amos" next --json --dir <project-root> \
+  | jq -r '.nodes[] | "\(.name)\t\(.description)"'
 ```
 
-If there's more than one ready item, **ask the user to pick** — don't choose
-for them. Show each with its `#N — title` line.
+If `.count == 1`, pick it. If multiple, present them as a short list in
+English and ask the user to pick. Don't decide for them.
 
 ## Step 2 — Load context for the chosen issue
 
-For the chosen `<issue>` (e.g. `@github:tatolab/streamlib#326`):
+For the chosen `<issue>` (e.g. `@github:tatolab/streamlib#347`):
 
 ```bash
-# Full issue: description, exit criteria, tests, comments, labels.
-gh issue view <N> --repo <owner>/<repo> --json title,body,state,labels,milestone,comments
+# Full issue content from GitHub
+gh issue view <N> --repo <owner>/<repo> --json \
+  title,body,state,labels,milestone,comments
 
-# Optional: any local AI notes in an amos plan file.
-"$HOME/.local/bin/amos" show "<issue>"
+# Any local AI notes in an amos plan file
+"$HOME/.local/bin/amos" show <issue> --json \
+  | jq -r '.body // ""'
 ```
 
-Then, for each label on the issue, look for a matching workflow file in the
-project's `.claude/workflows/` directory:
-
-```bash
-ls <project-root>/.claude/workflows/
-# If <label>.md exists, read it — it carries specialty context for that kind
-# of work (e.g. video-e2e.md, ci.md, macos.md).
-```
-
-Read every matching workflow file into context before starting.
+Extract labels from the issue JSON (`.labels | map(.name)`). For each
+label, check if `<project-root>/.claude/workflows/<label>.md` exists;
+read every matching file into context. Those specialty workflows carry
+mandatory rules for the kind of work (`ci`, `video-e2e`, `macos`,
+`polyglot`, `research`, etc.).
 
 ## Step 3 — Announce + gate on confirmation
 
-Emit exactly this block, filled in:
+Compose a short announcement in English (not JSON). Example shape:
 
 ```
 ## Starting Task
 
 - **Issue**: #<N> — <title>
 - **Milestone**: <milestone title>
-- **Labels**: <label1>, <label2>
-- **Loaded workflows**: <list of .claude/workflows/*.md read, or "none">
+- **Labels**: <labels, or "none">
+- **Loaded workflows**: <files read, or "none">
 - **Branch**: `<branch-name>`
-- **Summary**: <1–2 sentence plan from the issue Description>
-- **Exit criteria**: <count, from issue Exit criteria section>
-- **Tests to run as gate**: <count, from issue Tests/validation section>
-- **Files in scope**: <list — from issue + workflow context>
-- **Estimated scope**: small | medium | large
+- **Summary**: <1–2 sentence plan from the Description section>
+- **Exit criteria**: <N items from the Exit criteria section>
+- **Test gate**: <list of tests to run from the Tests/validation section>
+- **Files in scope**: <from issue + workflows>
+- **Scope estimate**: small | medium | large
 
 Proceed? [y/n]
 ```
 
-**Wait for explicit user confirmation.** Do not proceed on silence.
+Wait for explicit user confirmation.
 
 ## Step 4 — Branch
 
 ```bash
 git checkout main && git pull origin main
-git checkout -b <branch-name>
+git checkout -b <type>/<slug>-<N>
 ```
 
-Branch name convention: `<type>/<slug>-<issue-num>` where `<type>` is
-`feat` / `fix` / `refactor` / `docs` / `test` / `chore` depending on
-the issue. Use the shortest slug that's still readable.
+`<type>` = `feat` / `fix` / `refactor` / `docs` / `test` / `chore`
+from the conventional-commit family.
 
 ## Step 5 — Do the work
 
-- Scope: strictly the issue's Exit criteria. Anything else → note as a
-  follow-up, do not touch.
-- Honor every rule in `CLAUDE.md` and in the loaded workflow files.
-- `cargo check` (or project-specific equivalent) frequently.
-- Conventional commits (`feat:`, `fix:`, etc.), one logical change per
-  commit.
-- Never commit broken code. If a commit would be broken, fold the fix in
-  before committing.
+- Scope: strictly the Exit criteria. Note anything else as follow-up,
+  don't touch.
+- Honor `CLAUDE.md` + every loaded workflow file.
+- `cargo check` (or project equivalent) frequently.
+- Conventional commits. Never commit broken code.
 
 ## Step 6 — Run the test gate
 
 For each bullet in the issue's **Tests / validation** section, run the
-corresponding command. Report results in this block:
+command and collect the result. Compose results in English:
 
 ```
 ## Test Results
 
-- **cargo check**: ✅ | ❌
-- **cargo test <pattern>**: ✅ N passed | ❌ N failed
-- **<E2E or other workflow-driven test>**: ✅ | ❌ | ⏭ skipped (reason)
+- cargo check: ✅
+- cargo test <pattern>: ✅ N passed
+- <E2E / workflow-driven test>: ✅ | ❌ | ⏭ skipped (reason)
 
 ### Issues found
 - <any, or "None">
 ```
 
-If any gate fails, **fix it before opening the PR**. If a listed test
-cannot be run in this environment (e.g. needs a GPU CI), explicitly flag
-it as skipped and call out that the PR needs that check when CI runs.
+Don't push until the gate is green. If a listed test can't run in this
+environment (no GPU CI, etc.), mark ⏭ skipped with a clear reason and
+note that CI must catch it.
 
 ## Step 7 — Push + open PR
 
 ```bash
 git push -u origin <branch-name>
-gh pr create --title "<conventional-commit-style>" --body "$(cat <<'EOF'
+gh pr create --title "<conventional-commit title>" --body "$(cat <<'EOF'
 ## Summary
-
-<1–3 bullets — what changed and why>
+<1–3 bullets>
 
 ## Closes
-
 Closes #<N>
 
 ## Exit criteria
-
-<checklist copied from the issue body, with items checked off>
+<copied from issue body, checked>
 
 ## Test plan
-
-<checklist from the issue's Tests/validation section, with results>
+<copied from issue Tests/validation, with results>
 
 ## Follow-ups
-
-<list of out-of-scope things discovered, or "None">
+<out-of-scope, or "None">
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -199,36 +181,32 @@ EOF
 
 ## Step 8 — Report back
 
+English summary, not JSON:
+
 ```
 ## Task Complete
 
 - **Issue**: #<N> — <title>
 - **Branch**: `<branch-name>`
 - **PR**: <url>
-- **Commits**: <n>
-- **Files changed**: <n>
-- **Lines**: +<added> / -<removed>
+- **Commits**: <n> · **Files**: <n> · **Lines**: +<added> / -<removed>
 
 ### Tests run
-- <summary>
+<summary>
 
 ### Follow-ups filed
-- <list, or "None">
+<list, or "None">
 
 ### Ready for review
-PR is open. Do NOT merge — merge is the user's call.
+PR is open — merge is the user's call.
 ```
 
 ## Rules (non-negotiable)
 
-1. **One branch per issue.** Never mix work from multiple issues.
-2. **Never merge to main.** PRs only.
-3. **Never edit outside scope.** Note as follow-up.
-4. **Always announce and wait for confirmation** before branching.
-5. **Always run the test gate** before pushing.
-6. **Never ignore a label's workflow file** — if `.claude/workflows/<label>.md`
-   exists for a label on this issue, its instructions are mandatory for
-   this task.
-7. **Bank follow-ups as new issues** when the user asks — include the same
-   `Description / Context / Exit criteria / Tests / Related` template and
-   assign to a milestone.
+1. One branch per issue.
+2. Never merge to main.
+3. Never edit outside scope.
+4. Always announce + wait for confirmation.
+5. Always run the test gate before pushing.
+6. Every matching `.claude/workflows/<label>.md` is mandatory.
+7. Present data to the user in natural English, never raw JSON.

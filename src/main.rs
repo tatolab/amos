@@ -83,14 +83,27 @@ fn main() -> Result<()> {
         Some(Command::Focus { milestone, clear }) => {
             if *clear {
                 amos::amosrc::write_focus(&scan_root, None)?;
-                eprintln!("amos: cleared focused milestone");
+                if cli.json {
+                    println!("{}", serde_json::json!({"focus": null, "action": "cleared"}));
+                } else {
+                    eprintln!("amos: cleared focused milestone");
+                }
             } else if let Some(m) = milestone {
                 amos::amosrc::write_focus(&scan_root, Some(m))?;
-                eprintln!("amos: focused on milestone '{}'", m);
+                if cli.json {
+                    println!("{}", serde_json::json!({"focus": m, "action": "set"}));
+                } else {
+                    eprintln!("amos: focused on milestone '{}'", m);
+                }
             } else {
-                match amos::amosrc::read_focus(&scan_root)? {
-                    Some(m) => println!("{}", m),
-                    None => eprintln!("amos: no milestone currently focused"),
+                let current = amos::amosrc::read_focus(&scan_root)?;
+                if cli.json {
+                    println!("{}", serde_json::json!({"focus": current}));
+                } else {
+                    match current {
+                        Some(m) => println!("{}", m),
+                        None => eprintln!("amos: no milestone currently focused"),
+                    }
                 }
             }
             return Ok(());
@@ -123,6 +136,34 @@ fn main() -> Result<()> {
 
     // Handle show command
     if let Some(Command::Show { node }) = &cli.command {
+        if cli.json {
+            let Some(n) = dag.get_node(node) else {
+                println!("{}", serde_json::json!({"error": "node not found", "name": node}));
+                std::process::exit(1);
+            };
+            let adapter_fields = registry.resolve(node).and_then(|r| r.ok());
+            let facts = adapter_fields
+                .as_ref()
+                .map(|f| &f.facts)
+                .cloned()
+                .unwrap_or_default();
+            let body = adapter_fields.as_ref().and_then(|f| f.body.clone());
+            println!("{}", serde_json::json!({
+                "name": n.name,
+                "description": n.description,
+                "blocked_by": n.blocked_by,
+                "blocks": n.blocks,
+                "related_to": n.related_to,
+                "duplicates": n.duplicates,
+                "superseded_by": n.superseded_by,
+                "labels_local": n.labels,
+                "priority": n.priority.map(|p| format!("{:?}", p).to_lowercase()),
+                "facts": facts,
+                "body": body,
+                "source_file": n.source_file.display().to_string(),
+            }));
+            return Ok(());
+        }
         print!("{}", output::format_node(&dag, node, &registry));
         return Ok(());
     }
@@ -130,6 +171,22 @@ fn main() -> Result<()> {
     // Handle validate command
     if matches!(&cli.command, Some(Command::Validate)) {
         let issues = dag.validate(&scan_root);
+        if cli.json {
+            let issues_json: Vec<serde_json::Value> = issues
+                .iter()
+                .map(|i| dag_issue_to_json(i))
+                .collect();
+            let result = serde_json::json!({
+                "ok": issues.is_empty(),
+                "node_count": dag.all_nodes().len(),
+                "issues": issues_json,
+            });
+            println!("{}", result);
+            if !issues.is_empty() {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         if issues.is_empty() {
             eprintln!("amos: DAG clean — {} nodes, no issues", dag.all_nodes().len());
             return Ok(());
@@ -237,6 +294,18 @@ fn main() -> Result<()> {
         matching.sort_by(|a, b| {
             amos::output::numeric_aware_cmp(&a.name, &b.name)
         });
+        if cli.json {
+            let arr: Vec<serde_json::Value> = matching
+                .iter()
+                .map(|n| node_to_json(n, adapter_facts.get(&n.name)))
+                .collect();
+            println!("{}", serde_json::json!({
+                "focus": focus,
+                "count": arr.len(),
+                "nodes": arr,
+            }));
+            return Ok(());
+        }
         for node in &matching {
             let desc = node.description.as_deref().unwrap_or("");
             if desc.is_empty() {
@@ -306,6 +375,25 @@ fn main() -> Result<()> {
                 entry.2 += 1;
             }
         }
+        if cli.json {
+            let milestones_arr: Vec<serde_json::Value> = milestone_counts
+                .iter()
+                .map(|(title, (open, closed, ready))| {
+                    serde_json::json!({
+                        "title": title,
+                        "open": open,
+                        "ready": ready,
+                        "done": closed,
+                        "focused": current_focus.as_deref() == Some(title.as_str()),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::json!({
+                "focus": current_focus,
+                "milestones": milestones_arr,
+            }));
+            return Ok(());
+        }
         if milestone_counts.is_empty() {
             eprintln!("amos: no milestones found in adapter data");
             return Ok(());
@@ -331,6 +419,55 @@ fn main() -> Result<()> {
     print!("{}", output::format_dag(&dag, &registry));
 
     Ok(())
+}
+
+/// Serialize a DagIssue as a structured JSON object for `--json` output.
+fn dag_issue_to_json(issue: &amos::dag::DagIssue) -> serde_json::Value {
+    use amos::dag::DagIssue;
+    match issue {
+        DagIssue::DuplicateName { name, files } => serde_json::json!({
+            "kind": "duplicate_name",
+            "name": name,
+            "files": files,
+        }),
+        DagIssue::MissingDependency { from_node, missing_dep } => serde_json::json!({
+            "kind": "missing_dependency",
+            "from": from_node,
+            "missing": missing_dep,
+        }),
+        DagIssue::CycleDetected => serde_json::json!({
+            "kind": "cycle_detected",
+        }),
+        DagIssue::DanglingContext { node, context_path } => serde_json::json!({
+            "kind": "dangling_context",
+            "node": node,
+            "context_path": context_path,
+        }),
+    }
+}
+
+/// Serialize a Node (plus optional adapter facts) for JSON output of
+/// `next` / `blocked` / `orphans`. Keeps the payload compact — full body
+/// is only returned by `show --json`.
+fn node_to_json(
+    node: &amos::parser::Node,
+    facts: Option<&amos::adapter::ResourceFields>,
+) -> serde_json::Value {
+    let issue_number = node
+        .name
+        .rsplit_once('#')
+        .and_then(|(_, n)| n.parse::<u64>().ok());
+    serde_json::json!({
+        "name": node.name,
+        "issue_number": issue_number,
+        "description": node.description,
+        "blocked_by": node.blocked_by,
+        "blocks": node.blocks,
+        "related_to": node.related_to,
+        "labels_local": node.labels,
+        "facts": facts.map(|f| f.facts.clone()).unwrap_or_default(),
+        "milestone": facts.and_then(|f| f.facts.get("milestone").cloned()),
+    })
 }
 
 /// Build the adapter registry.
