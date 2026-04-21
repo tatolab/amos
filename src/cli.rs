@@ -98,4 +98,24 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Push every local `blocked_by:` / `blocks:` edge up to the adapter as a
+    /// native relationship (GitHub's typed issue dependencies). Idempotent —
+    /// edges already present upstream are skipped.
+    SyncEdges {
+        /// Show the plan without mutating the adapter.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Create a new issue in the adapter's backing system from a JSON spec,
+    /// applying milestone, labels, and native relationships in one call.
+    /// The spec shape matches `IssueSpec` (see `amos --help issue create`
+    /// for the schema).
+    IssueCreate {
+        /// Adapter scheme. Default is "github".
+        #[arg(long, default_value = "github")]
+        scheme: String,
+        /// Path to JSON spec file. Use "-" (default) for stdin.
+        #[arg(long, default_value = "-")]
+        spec: String,
+    },
 }

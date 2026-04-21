@@ -156,6 +156,31 @@ note that CI must catch it.
 
 ## Step 7 — Push + open PR
 
+Before creating the PR, collect **every** issue the branch addresses — not just
+the primary one from Step 1 — so GitHub auto-closes all of them on merge.
+
+### Detect addressed issues
+
+Gather the set from three sources, then dedup:
+
+1. **Primary issue** from Step 1.
+2. **Commit trailers** — scan this branch's commits for explicit close
+   keywords:
+   ```bash
+   git log main..HEAD --pretty=%B \
+     | grep -oiE '(closes|fixes|resolves) +#[0-9]+' \
+     | grep -oE '#[0-9]+' | sort -u
+   ```
+3. **Branch name** — if the branch name ends in `-<N>` (e.g.
+   `fix/api-server-config-388`), treat that as a primary.
+
+If a commit mentions an issue without a close keyword (just `#N`), that's a
+reference, not a closing link — don't auto-close it. If you're unsure whether
+an issue should close with this PR, leave it out and file a follow-up; wrong
+auto-closes are annoying to reverse.
+
+### Create the PR
+
 ```bash
 git push -u origin <branch-name>
 gh pr create --title "<conventional-commit title>" --body "$(cat <<'EOF'
@@ -163,7 +188,9 @@ gh pr create --title "<conventional-commit title>" --body "$(cat <<'EOF'
 <1–3 bullets>
 
 ## Closes
-Closes #<N>
+Closes #<N1>
+Closes #<N2>
+Closes #<N3>
 
 ## Exit criteria
 <copied from issue body, checked>
@@ -178,6 +205,9 @@ Closes #<N>
 EOF
 )"
 ```
+
+One `Closes #N` per line — GitHub's auto-close parser only fires on that
+exact shape. `Closes #1, #2, #3` on one line does NOT work.
 
 ## Step 8 — Report back
 
