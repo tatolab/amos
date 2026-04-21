@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 
-use crate::adapter::{Adapter, ResourceFields};
+use crate::adapter::{Adapter, AdapterNode, MilestoneInfo, RelationshipKind, ResourceFields};
 use crate::url_adapter::download_to_cache;
 
 /// GitHub adapter — resolves `gh:` URIs via the `gh` CLI.
@@ -21,6 +22,21 @@ pub struct GhAdapter {
 impl GhAdapter {
     pub fn new(default_repo: Option<String>) -> Self {
         GhAdapter { default_repo }
+    }
+
+    /// Construct a `GhAdapter` whose default repo is inferred from the scan
+    /// root's git remote. Falls back to `None` if the directory isn't a git
+    /// checkout or the remote doesn't point at github.com.
+    pub fn with_detected_repo(scan_root: &Path) -> Self {
+        GhAdapter {
+            default_repo: detect_github_repo(scan_root),
+        }
+    }
+
+    /// Read the effective default repo (from the arg passed to `new()` or
+    /// auto-detected from the scan root).
+    pub fn default_repo(&self) -> Option<&str> {
+        self.default_repo.as_deref()
     }
 
     fn parse_ref(&self, reference: &str) -> Result<(Option<String>, u64)> {
@@ -446,6 +462,486 @@ impl Adapter for GhAdapter {
         }
 
         Ok(results)
+    }
+
+    fn list_milestones(&self) -> Result<Vec<MilestoneInfo>> {
+        let Some(repo) = self.default_repo.as_deref() else {
+            return Ok(Vec::new());
+        };
+        fetch_milestones_graphql(repo)
+    }
+
+    fn list_nodes_in_milestone(&self, milestone: &str) -> Result<Vec<AdapterNode>> {
+        let Some(repo) = self.default_repo.as_deref() else {
+            return Ok(Vec::new());
+        };
+        fetch_milestone_issues_graphql(repo, milestone)
+    }
+
+    fn add_relationship(
+        &self,
+        from: &str,
+        to: &str,
+        kind: RelationshipKind,
+    ) -> Result<()> {
+        let (from_repo, from_num) = self.parse_ref(from)?;
+        let (to_repo, to_num) = self.parse_ref(to)?;
+        if from_repo != to_repo {
+            bail!(
+                "relationships across different repos aren't supported: {} → {}",
+                from,
+                to
+            );
+        }
+        let Some(repo) = from_repo.as_deref().or(self.default_repo.as_deref()) else {
+            bail!("no default repo — pass --repo or run inside a git checkout");
+        };
+        add_relationship_graphql(repo, from_num, to_num, kind)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GraphQL helpers
+//
+// The GhAdapter talks to the REST API for single-issue view/comment and the
+// paginated issue list, but the relationship fields (`blockedBy`, `blocking`,
+// `parent`, `subIssues`) and the mutation endpoints for native relationships
+// live in GraphQL only. The helpers below are intentionally stateless — they
+// shell out to `gh api graphql`, the same auth path the REST calls use.
+// ---------------------------------------------------------------------------
+
+/// Detect a GitHub repo (`owner/name`) from the directory's git remote.
+/// Returns `None` if the directory isn't a git checkout, has no remote, or
+/// the remote doesn't point at github.com.
+fn detect_github_repo(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", dir.to_str()?, "remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_github_remote(&url)
+}
+
+/// Extract `owner/name` from typical github.com remote URL shapes:
+/// - `https://github.com/owner/name.git`
+/// - `git@github.com:owner/name.git`
+/// - `ssh://git@github.com/owner/name.git`
+fn parse_github_remote(url: &str) -> Option<String> {
+    let stripped = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("git@github.com:"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
+    let without_suffix = stripped.strip_suffix(".git").unwrap_or(stripped);
+    let parts: Vec<&str> = without_suffix.splitn(3, '/').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", parts[0], parts[1]))
+}
+
+/// Run a `gh api graphql` query and return the parsed JSON response. Query
+/// variables are passed as `-F key=value`.
+fn run_graphql(query: &str, variables: &[(&str, &str)]) -> Result<serde_json::Value> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "graphql", "-f", &format!("query={}", query)]);
+    for (k, v) in variables {
+        cmd.args(["-F", &format!("{}={}", k, v)]);
+    }
+    let output = cmd
+        .output()
+        .context("failed to run 'gh api graphql' — is gh CLI installed?")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh api graphql failed: {}", stderr.trim());
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parsing graphql JSON response")?;
+    if let Some(errors) = parsed.get("errors") {
+        bail!("graphql errors: {}", errors);
+    }
+    Ok(parsed)
+}
+
+fn fetch_milestones_graphql(repo: &str) -> Result<Vec<MilestoneInfo>> {
+    let (owner, name) = split_repo(repo)?;
+    let query = r#"
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            milestones(first: 100, orderBy: {field: NUMBER, direction: ASC}) {
+              nodes {
+                title
+                state
+                openIssues: issues(states: OPEN) { totalCount }
+                closedIssues: issues(states: CLOSED) { totalCount }
+              }
+            }
+          }
+        }
+    "#;
+    let response = run_graphql(query, &[("owner", owner), ("name", name)])?;
+    let nodes = response
+        .pointer("/data/repository/milestones/nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let title = node
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let state = node
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OPEN")
+            .to_string();
+        let open_count = node
+            .pointer("/openIssues/totalCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let closed_count = node
+            .pointer("/closedIssues/totalCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        out.push(MilestoneInfo {
+            title,
+            state,
+            open_count,
+            closed_count,
+        });
+    }
+    Ok(out)
+}
+
+fn fetch_milestone_issues_graphql(repo: &str, milestone_title: &str) -> Result<Vec<AdapterNode>> {
+    let (owner, name) = split_repo(repo)?;
+    // Pagination: we ask for up to 100 issues per page and re-query until
+    // `hasNextPage` is false.
+    let query = r#"
+        query($owner: String!, $name: String!, $milestone: String!, $cursor: String) {
+          repository(owner: $owner, name: $name) {
+            milestones(query: $milestone, first: 10) {
+              nodes {
+                title
+                issues(first: 100, after: $cursor, states: [OPEN, CLOSED]) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    number title state
+                    labels(first: 20) { nodes { name } }
+                    milestone { title }
+                    blockedBy(first: 50) { nodes { number } }
+                    blocking(first: 50) { nodes { number } }
+                    parent { number }
+                    subIssues(first: 50) { nodes { number } }
+                  }
+                }
+              }
+            }
+          }
+        }
+    "#;
+
+    let mut cursor: Option<String> = None;
+    let mut out: Vec<AdapterNode> = Vec::new();
+    loop {
+        let cursor_arg = cursor.as_deref().unwrap_or("");
+        let mut vars: Vec<(&str, &str)> = vec![
+            ("owner", owner),
+            ("name", name),
+            ("milestone", milestone_title),
+        ];
+        if !cursor_arg.is_empty() {
+            vars.push(("cursor", cursor_arg));
+        }
+        let response = run_graphql(query, &vars)?;
+        // The `milestones(query:)` search can return multiple partial-title
+        // matches; filter to exact title only.
+        let milestones = response
+            .pointer("/data/repository/milestones/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let Some(milestone) = milestones
+            .iter()
+            .find(|m| m.get("title").and_then(|v| v.as_str()) == Some(milestone_title))
+        else {
+            break;
+        };
+        let issues_obj = milestone
+            .pointer("/issues")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let issue_nodes = issues_obj
+            .pointer("/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for issue in issue_nodes {
+            out.push(issue_json_to_adapter_node(&issue, repo));
+        }
+        let has_next = issues_obj
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !has_next {
+            break;
+        }
+        cursor = issues_obj
+            .pointer("/pageInfo/endCursor")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+fn issue_json_to_adapter_node(issue: &serde_json::Value, repo: &str) -> AdapterNode {
+    let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+    let title = issue
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let state = issue
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("OPEN")
+        .to_string();
+    let labels: Vec<String> = issue
+        .pointer("/labels/nodes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l.get("name").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let milestone = issue
+        .pointer("/milestone/title")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let extract_numbers = |path: &str| -> Vec<String> {
+        issue
+            .pointer(path)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.get("number").and_then(|v| v.as_u64()))
+                    .map(|n| format!("@github:{}#{}", repo, n))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let blocked_by = extract_numbers("/blockedBy/nodes");
+    let blocks = extract_numbers("/blocking/nodes");
+    let sub_issues = extract_numbers("/subIssues/nodes");
+    let parent = issue
+        .pointer("/parent/number")
+        .and_then(|v| v.as_u64())
+        .map(|n| format!("@github:{}#{}", repo, n));
+
+    let mut facts: HashMap<String, String> = HashMap::new();
+    facts.insert("state".to_string(), state);
+    if !labels.is_empty() {
+        facts.insert("labels".to_string(), labels.join(", "));
+    }
+    if let Some(ms) = milestone {
+        facts.insert("milestone".to_string(), ms);
+    }
+
+    AdapterNode {
+        name: format!("@github:{}#{}", repo, number),
+        title,
+        facts,
+        blocked_by,
+        blocks,
+        parent,
+        sub_issues,
+    }
+}
+
+/// Look up an issue's GraphQL node ID. Required for the relationship
+/// mutations — they take opaque IDs, not numbers.
+fn fetch_issue_node_id(repo: &str, number: u64) -> Result<String> {
+    let (owner, name) = split_repo(repo)?;
+    let query = r#"
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            issue(number: $number) { id }
+          }
+        }
+    "#;
+    let num_str = number.to_string();
+    let vars = [("owner", owner), ("name", name), ("number", num_str.as_str())];
+    // `-F` stringifies numbers, which is what GraphQL's Int scalar accepts
+    // over the CLI. (The server coerces.)
+    let response = run_graphql(query, &vars)?;
+    response
+        .pointer("/data/repository/issue/id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("issue {}#{} not found", repo, number))
+}
+
+fn add_relationship_graphql(
+    repo: &str,
+    from_num: u64,
+    to_num: u64,
+    kind: RelationshipKind,
+) -> Result<()> {
+    let from_id = fetch_issue_node_id(repo, from_num)?;
+    let to_id = fetch_issue_node_id(repo, to_num)?;
+
+    match kind {
+        RelationshipKind::BlockedBy => {
+            // from is blocked by to — addBlockedBy takes issueId + blockingIssueId
+            let query = r#"
+                mutation($issue: ID!, $blocking: ID!) {
+                  addBlockedBy(input: {issueId: $issue, blockingIssueId: $blocking}) {
+                    issue { number }
+                  }
+                }
+            "#;
+            run_graphql(query, &[("issue", &from_id), ("blocking", &to_id)])?;
+        }
+        RelationshipKind::Blocks => {
+            // from blocks to — same mutation, flipped args
+            let query = r#"
+                mutation($issue: ID!, $blocking: ID!) {
+                  addBlockedBy(input: {issueId: $issue, blockingIssueId: $blocking}) {
+                    issue { number }
+                  }
+                }
+            "#;
+            run_graphql(query, &[("issue", &to_id), ("blocking", &from_id)])?;
+        }
+        RelationshipKind::SubIssueOf => {
+            // from is a sub-issue of to — addSubIssue takes parent (to) +
+            // child (from) as sub-issue.
+            let query = r#"
+                mutation($parent: ID!, $child: ID!) {
+                  addSubIssue(input: {issueId: $parent, subIssueId: $child}) {
+                    issue { number }
+                  }
+                }
+            "#;
+            run_graphql(query, &[("parent", &to_id), ("child", &from_id)])?;
+        }
+    }
+    Ok(())
+}
+
+fn split_repo(repo: &str) -> Result<(&str, &str)> {
+    repo.split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("malformed repo '{}', expected owner/name", repo))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_https_remote() {
+        assert_eq!(
+            parse_github_remote("https://github.com/tatolab/amos.git"),
+            Some("tatolab/amos".to_string())
+        );
+        assert_eq!(
+            parse_github_remote("https://github.com/tatolab/amos"),
+            Some("tatolab/amos".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_ssh_remote() {
+        assert_eq!(
+            parse_github_remote("git@github.com:tatolab/amos.git"),
+            Some("tatolab/amos".to_string())
+        );
+        assert_eq!(
+            parse_github_remote("ssh://git@github.com/tatolab/amos.git"),
+            Some("tatolab/amos".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_non_github_remote_returns_none() {
+        assert_eq!(parse_github_remote("https://gitlab.com/foo/bar.git"), None);
+        assert_eq!(parse_github_remote("https://example.com/foo/bar.git"), None);
+    }
+
+    #[test]
+    fn parse_malformed_remote_returns_none() {
+        assert_eq!(parse_github_remote("not-a-url"), None);
+        assert_eq!(parse_github_remote("https://github.com/"), None);
+        assert_eq!(parse_github_remote("https://github.com/just-owner"), None);
+    }
+
+    #[test]
+    fn split_repo_handles_owner_name() {
+        let (owner, name) = split_repo("tatolab/amos").unwrap();
+        assert_eq!(owner, "tatolab");
+        assert_eq!(name, "amos");
+    }
+
+    #[test]
+    fn issue_json_to_adapter_node_extracts_relationships() {
+        let issue = serde_json::json!({
+            "number": 42,
+            "title": "Test issue",
+            "state": "OPEN",
+            "labels": { "nodes": [{"name": "bug"}, {"name": "linux"}] },
+            "milestone": { "title": "Some Milestone" },
+            "blockedBy": { "nodes": [{"number": 10}, {"number": 11}] },
+            "blocking": { "nodes": [{"number": 99}] },
+            "parent": { "number": 5 },
+            "subIssues": { "nodes": [{"number": 100}] }
+        });
+        let node = issue_json_to_adapter_node(&issue, "tatolab/amos");
+        assert_eq!(node.name, "@github:tatolab/amos#42");
+        assert_eq!(node.title, "Test issue");
+        assert_eq!(
+            node.blocked_by,
+            vec!["@github:tatolab/amos#10", "@github:tatolab/amos#11"]
+        );
+        assert_eq!(node.blocks, vec!["@github:tatolab/amos#99"]);
+        assert_eq!(node.parent.as_deref(), Some("@github:tatolab/amos#5"));
+        assert_eq!(node.sub_issues, vec!["@github:tatolab/amos#100"]);
+        assert_eq!(node.facts.get("state").map(|s| s.as_str()), Some("OPEN"));
+        assert_eq!(node.facts.get("labels").map(|s| s.as_str()), Some("bug, linux"));
+        assert_eq!(
+            node.facts.get("milestone").map(|s| s.as_str()),
+            Some("Some Milestone")
+        );
+    }
+
+    #[test]
+    fn issue_json_to_adapter_node_handles_empty_relationships() {
+        let issue = serde_json::json!({
+            "number": 1,
+            "title": "",
+            "state": "CLOSED"
+        });
+        let node = issue_json_to_adapter_node(&issue, "tatolab/amos");
+        assert!(node.blocked_by.is_empty());
+        assert!(node.blocks.is_empty());
+        assert!(node.sub_issues.is_empty());
+        assert!(node.parent.is_none());
+        assert_eq!(node.facts.get("state").map(|s| s.as_str()), Some("CLOSED"));
     }
 }
 

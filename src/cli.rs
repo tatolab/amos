@@ -98,4 +98,12 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Push every local `blocked_by:` / `blocks:` edge up to the adapter as a
+    /// native relationship (GitHub's typed issue dependencies). Idempotent —
+    /// edges already present upstream are skipped.
+    SyncEdges {
+        /// Show the plan without mutating the adapter.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

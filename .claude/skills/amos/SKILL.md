@@ -10,50 +10,66 @@ description: >
 
 # Amos
 
-Amos is a CLI preprocessor over markdown files. Each file with `whoami: amos` frontmatter is a
-**node** in a dependency graph. Typical use: project plans, tickets, tasks, or work items that
-span external trackers (GitHub issues, etc.) with `down:` / `up:` edges between them.
+Amos is a CLI preprocessor that overlays a local markdown cache on the adapter's source of truth
+(GitHub issues today, other trackers via adapter). The adapter is authoritative for what issues
+exist, their state, milestone, and dependency edges. Local plan files are optional overlays that
+hold AI-specific notes or pre-GA edges not yet pushed upstream.
+
+Read: the DAG is fetched fresh from GitHub on every `amos` call. Issues appear whether or not
+they have a local plan file.
 
 ## The canonical name rule — NON-NEGOTIABLE
 
-Every node has an identifier in its `name:` field. Use the adapter-qualified form:
+Every node — whether materialized from GitHub directly or from a local plan file — is identified
+by an adapter-qualified name:
 
-```yaml
-name: "@github:<owner>/<repo>#<issue-number>"
+```
+@github:<owner>/<repo>#<issue-number>
 ```
 
-e.g. `name: "@github:tatolab/streamlib#326"`.
+e.g. `@github:tatolab/streamlib#326`. This is the string amos uses for every edge lookup; every
+`blocked_by:` / `blocks:` / `related_to:` reference uses it.
 
-**Never put human-readable text in `name:`.** `name:` is a stable identifier used for edge
-resolution. Every `down:` and `up:` edge references another node by this string, so edits to it
-silently break the DAG. Put titles, summaries, and routing hints in `description:` (free-form).
+## Dependency edges: GitHub native > plan file
 
-If you see a node with a free-text name (e.g. `name: "Learning doc: ..."`), that's drift and
-should be fixed — rename to the canonical form and move the free text into `description:`.
+GitHub's issue UI now exposes **five typed relationships** (blocked-by, blocks, parent,
+sub-issue, duplicate). Amos reads these natively via GraphQL (`blockedBy`, `blocking`,
+`parent`, `subIssues`). Any edge declared through the GitHub UI or REST/GraphQL API is
+visible to `amos graph` / `next` / `blocked` with zero local state.
 
-## Node file format
+**Plan files are no longer required to declare edges.** The old `blocked_by:` / `blocks:`
+frontmatter fields still work — they're merged with GitHub's native edges — but adding new
+edges should go through GitHub's UI or `gh api graphql` so the dependency graph stays in one
+place.
+
+To migrate a project's existing plan-file edges to GitHub native:
+
+```bash
+"$HOME/.local/bin/amos" sync-edges --dry-run --dir <project-root>   # preview
+"$HOME/.local/bin/amos" sync-edges --dir <project-root>             # apply
+```
+
+The operation is idempotent; re-running is safe.
+
+## Optional plan file format
+
+Only create a plan file when you have AI-specific notes that shouldn't live in the public GitHub
+issue body. The file format is:
 
 ```markdown
 ---
 whoami: amos
 name: "@github:<owner>/<repo>#<N>"
-status: pending | in-progress | completed
 description: "<short routing hint — free-form>"
-github_issue: <N>
-dependencies:
-  - "down:@github:<owner>/<repo>#<M>"   # this node blocks M
-  - "up:@github:<owner>/<repo>#<K>"     # this node waits on K
+# blocked_by / blocks are optional — prefer setting these in GitHub's UI instead.
 adapters:
   github: builtin
 ---
 
-@github:<owner>/<repo>#<N>
-
-Local agent instructions below the adapter reference. These stay local even when
-the remote issue body is resolved by the adapter.
+Local agent instructions here. Kept local so they don't clutter the public issue.
 ```
 
-Filename convention: `<N>-<short-kebab-slug>.md` under `plan/` (or wherever amos scans).
+Filename convention: `<N>-<short-kebab-slug>.md` under `plan/`.
 
 ## Sub-skill routing
 

@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-use amos::adapter::AdapterRegistry;
+use amos::adapter::{AdapterNode, AdapterRegistry, RelationshipKind};
 use amos::adapter_pull;
 use amos::cli::{Cli, Command};
 use amos::dag::Dag;
@@ -11,7 +12,7 @@ use amos::file_adapter::FileAdapter;
 use amos::gh_adapter::GhAdapter;
 use amos::url_adapter::UrlAdapter;
 use amos::output;
-use amos::parser;
+use amos::parser::{self, Node};
 use amos::scanner;
 
 fn main() -> Result<()> {
@@ -111,19 +112,44 @@ fn main() -> Result<()> {
         _ => {}
     }
 
-    // Scan + parse
+    // Scan + parse. Scanning is optional for commands that only talk to the
+    // adapter — SyncEdges and Milestones (adapter-first) work without local
+    // nodes, but we still scan so status/focus helpers have a consistent
+    // scan_root to anchor on.
     let blocks = scanner::scan_directory(&scan_root)
         .with_context(|| format!("scanning {}", scan_root.display()))?;
 
-    if blocks.is_empty() {
+    let can_run_without_local_nodes = matches!(
+        &cli.command,
+        Some(Command::Milestones) | Some(Command::SyncEdges { .. })
+    );
+    if blocks.is_empty() && !can_run_without_local_nodes {
         eprintln!("No amos blocks found in {}", scan_root.display());
         std::process::exit(1);
     }
 
-    let nodes = parser::parse_blocks(&blocks).context("parsing amos blocks")?;
+    let local_nodes = parser::parse_blocks(&blocks).context("parsing amos blocks")?;
 
     // Build adapter registry
-    let registry = build_registry(&scan_root, &nodes);
+    let registry = build_registry(&scan_root, &local_nodes);
+
+    // If a milestone is focused, enumerate every issue in it from the adapter
+    // and merge with local plan files. This is what makes unplanned GitHub
+    // issues visible to `graph` / `next` / `blocked` — they don't need a
+    // plan file to show up. Native relationship edges (GitHub's typed
+    // blockedBy / blocking / parent / subIssues) are also merged.
+    let focus = amos::amosrc::read_focus(&scan_root)?;
+    let mut adapter_nodes_by_name: std::collections::HashMap<String, AdapterNode> =
+        std::collections::HashMap::new();
+    let nodes = if let Some(focused) = focus.as_deref() {
+        let adapter_nodes = registry.list_nodes_in_milestone(focused);
+        for an in &adapter_nodes {
+            adapter_nodes_by_name.insert(an.name.clone(), an.clone());
+        }
+        merge_local_and_adapter_nodes(local_nodes, adapter_nodes)
+    } else {
+        local_nodes
+    };
 
     // Build DAG
     let dag = Dag::build(nodes.clone()).context("building DAG")?;
@@ -210,10 +236,10 @@ fn main() -> Result<()> {
             status_file.get(name) == amos::status::Status::Done
         };
 
-        // If a milestone is focused, pull adapter facts so we can scope
-        // results to that milestone. Adapter state (closed/milestone) takes
-        // precedence over .amos-status because the latter can drift.
-        let focus = amos::amosrc::read_focus(&scan_root)?;
+        // `focus` was read once up top (driving the adapter enumeration).
+        // Pull adapter facts for every DAG node so blocker state checks can
+        // consult authoritative adapter state, not just local `.amos-status`.
+        // resolve_batch is a single paginated call for github, so it's cheap.
         let adapter_facts: std::collections::HashMap<String, amos::adapter::ResourceFields> =
             if focus.is_some() {
                 let names: Vec<&str> = dag
@@ -324,94 +350,112 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Milestones listing — per-milestone open/closed/ready counts pulled from
-    // the adapter. "Ready" means an open node whose blocked_by set is fully
-    // done (via .amos-status) or closed (via adapter state).
+    // Milestones listing — source of truth is the adapter, not the local DAG.
+    // `open`/`done` come directly from native milestone counts; `ready` is
+    // computed per-milestone by enumerating issues and resolving each
+    // blocker's state.
     if matches!(&cli.command, Some(Command::Milestones)) {
-        let names: Vec<&str> = dag
-            .all_nodes()
-            .iter()
-            .filter(|n| registry.is_resolvable(&n.name))
-            .map(|n| n.name.as_str())
-            .collect();
-        let adapter_facts = registry.resolve_batch(&names).unwrap_or_default();
         let status_file = amos::status::StatusFile::load(&scan_root)?;
         let current_focus = amos::amosrc::read_focus(&scan_root)?;
 
-        let is_closed = |node_name: &str| -> bool {
-            adapter_facts
-                .get(node_name)
-                .and_then(|f| f.facts.get("state"))
-                .map(|s| s.eq_ignore_ascii_case("CLOSED"))
-                .unwrap_or(false)
-        };
-        let is_done_or_closed = |node_name: &str| -> bool {
-            if is_closed(node_name) {
-                return true;
-            }
-            status_file.get(node_name) == amos::status::Status::Done
-        };
+        let mut milestones = registry.list_all_milestones();
+        milestones.sort_by(|a, b| a.title.cmp(&b.title));
 
-        // title -> (open, closed, ready)
-        let mut milestone_counts: std::collections::BTreeMap<String, (usize, usize, usize)> =
+        // For every open milestone, enumerate its nodes (issues + native
+        // relationships) so we can compute `ready`. Collect blocker names
+        // that point outside the milestone — we resolve their state in a
+        // single batch call at the end.
+        let mut by_milestone: std::collections::BTreeMap<String, Vec<AdapterNode>> =
             std::collections::BTreeMap::new();
-        for (node_name, fields) in adapter_facts.iter() {
-            let Some(ms) = fields.facts.get("milestone") else { continue };
-            let state = fields
-                .facts
-                .get("state")
-                .map(|s| s.as_str())
-                .unwrap_or("OPEN");
-            let entry = milestone_counts.entry(ms.clone()).or_default();
-            if state.eq_ignore_ascii_case("CLOSED") {
-                entry.1 += 1;
+        let mut extra_state_lookups: HashSet<String> = HashSet::new();
+        for ms in &milestones {
+            if ms.open_count == 0 {
+                by_milestone.insert(ms.title.clone(), Vec::new());
                 continue;
             }
-            entry.0 += 1;
-            // Ready = all blockers satisfied.
-            let blockers = dag.blocked_by_of(node_name);
-            let all_satisfied = blockers.iter().all(|b| is_done_or_closed(&b.name));
-            if all_satisfied {
-                entry.2 += 1;
+            let nodes = registry.list_nodes_in_milestone(&ms.title);
+            let in_ms: HashSet<String> = nodes.iter().map(|n| n.name.clone()).collect();
+            for n in &nodes {
+                for blocker in &n.blocked_by {
+                    if !in_ms.contains(blocker) {
+                        extra_state_lookups.insert(blocker.clone());
+                    }
+                }
             }
+            by_milestone.insert(ms.title.clone(), nodes);
         }
+
+        let extra_refs: Vec<&str> = extra_state_lookups.iter().map(|s| s.as_str()).collect();
+        let extra_facts = registry.resolve_batch(&extra_refs).unwrap_or_default();
+
+        let is_closed_name = |name: &str, within: &[AdapterNode]| -> bool {
+            if let Some(n) = within.iter().find(|n| n.name == name) {
+                return n
+                    .facts
+                    .get("state")
+                    .map(|s| s.eq_ignore_ascii_case("CLOSED"))
+                    .unwrap_or(false);
+            }
+            if let Some(f) = extra_facts.get(name) {
+                if let Some(state) = f.facts.get("state") {
+                    return state.eq_ignore_ascii_case("CLOSED");
+                }
+            }
+            status_file.get(name) == amos::status::Status::Done
+        };
+
         if cli.json {
-            let milestones_arr: Vec<serde_json::Value> = milestone_counts
+            let arr: Vec<serde_json::Value> = milestones
                 .iter()
-                .map(|(title, (open, closed, ready))| {
+                .map(|ms| {
+                    let nodes = by_milestone
+                        .get(&ms.title)
+                        .cloned()
+                        .unwrap_or_default();
+                    let ready = count_ready_in(&nodes, &|n| is_closed_name(n, &nodes));
                     serde_json::json!({
-                        "title": title,
-                        "open": open,
+                        "title": ms.title,
+                        "state": ms.state,
+                        "open": ms.open_count,
+                        "done": ms.closed_count,
                         "ready": ready,
-                        "done": closed,
-                        "focused": current_focus.as_deref() == Some(title.as_str()),
+                        "focused": current_focus.as_deref() == Some(ms.title.as_str()),
                     })
                 })
                 .collect();
             println!("{}", serde_json::json!({
                 "focus": current_focus,
-                "milestones": milestones_arr,
+                "milestones": arr,
             }));
             return Ok(());
         }
-        if milestone_counts.is_empty() {
-            eprintln!("amos: no milestones found in adapter data");
+
+        if milestones.is_empty() {
+            eprintln!("amos: no milestones found");
             return Ok(());
         }
         println!("{:2}{:50}  {:>6}  {:>6}  {:>6}", "", "milestone", "open", "ready", "done");
-        for (title, (open, closed, ready)) in milestone_counts {
-            let marker = if current_focus.as_deref() == Some(title.as_str()) {
+        for ms in &milestones {
+            let nodes = by_milestone.get(&ms.title).cloned().unwrap_or_default();
+            let ready = count_ready_in(&nodes, &|n| is_closed_name(n, &nodes));
+            let marker = if current_focus.as_deref() == Some(ms.title.as_str()) {
                 "* "
             } else {
                 "  "
             };
-            let label = format!("\"{}\"", title);
+            let label = format!("\"{}\"", ms.title);
             println!(
                 "{}{:50}  {:>6}  {:>6}  {:>6}",
-                marker, label, open, ready, closed
+                marker, label, ms.open_count, ready, ms.closed_count
             );
         }
         return Ok(());
+    }
+
+    // Sync edges — one-time migration from local plan-file edges to native
+    // adapter relationships (GitHub's typed issue dependencies). Idempotent.
+    if let Some(Command::SyncEdges { dry_run }) = &cli.command {
+        return run_sync_edges(&registry, &nodes, *dry_run, cli.json);
     }
 
     // Default: dump the DAG
@@ -479,7 +523,7 @@ fn build_registry(scan_root: &std::path::Path, nodes: &[amos::parser::Node]) -> 
 
     // 1. Built-in adapters (defaults, can be overridden)
     registry.register(Box::new(FileAdapter::new(scan_root)));
-    registry.register(Box::new(GhAdapter::new(None)));
+    registry.register(Box::new(GhAdapter::with_detected_repo(scan_root)));
     registry.register(Box::new(UrlAdapter::new()));
     registry.register(Box::new(FfmpegAdapter::new(scan_root)));
 
@@ -557,8 +601,214 @@ fn print_migration_report(report: &amos::migrate::MigrationReport, dry_run: bool
 fn build_registry_minimal(scan_root: &std::path::Path) -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
     registry.register(Box::new(FileAdapter::new(scan_root)));
-    registry.register(Box::new(GhAdapter::new(None)));
+    registry.register(Box::new(GhAdapter::with_detected_repo(scan_root)));
     registry.register(Box::new(UrlAdapter::new()));
     registry.register(Box::new(FfmpegAdapter::new(scan_root)));
     registry
+}
+
+/// Merge adapter-sourced nodes with locally-parsed nodes. Local nodes win for
+/// every AI-facing field (body, context, labels, description) — the adapter
+/// just enriches with native edges. Adapter nodes that have no local match
+/// are added as virtual nodes so the DAG can see them.
+fn merge_local_and_adapter_nodes(
+    mut local: Vec<Node>,
+    adapter_nodes: Vec<AdapterNode>,
+) -> Vec<Node> {
+    let local_names: HashSet<String> = local.iter().map(|n| n.name.clone()).collect();
+
+    for an in &adapter_nodes {
+        if let Some(existing) = local.iter_mut().find(|n| n.name == an.name) {
+            for blocker in &an.blocked_by {
+                if !existing.blocked_by.contains(blocker) {
+                    existing.blocked_by.push(blocker.clone());
+                }
+            }
+            for blocked in &an.blocks {
+                if !existing.blocks.contains(blocked) {
+                    existing.blocks.push(blocked.clone());
+                }
+            }
+        }
+    }
+
+    for an in adapter_nodes {
+        if local_names.contains(&an.name) {
+            continue;
+        }
+        local.push(virtual_node_from_adapter(an));
+    }
+
+    local
+}
+
+/// Construct a minimal `Node` from an `AdapterNode` so it can participate in
+/// the DAG without a local plan file. `source_file` is a sentinel path.
+fn virtual_node_from_adapter(an: AdapterNode) -> Node {
+    let labels = an
+        .facts
+        .get("labels")
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+        .unwrap_or_default();
+    Node {
+        name: an.name,
+        description: if an.title.is_empty() { None } else { Some(an.title) },
+        blocked_by: an.blocked_by,
+        blocks: an.blocks,
+        related_to: Vec::new(),
+        duplicates: None,
+        superseded_by: None,
+        labels,
+        priority: None,
+        context: Vec::new(),
+        adapters: std::collections::HashMap::new(),
+        source_file: PathBuf::from("<adapter>"),
+        line_number: 0,
+        body: String::new(),
+    }
+}
+
+/// Count adapter nodes that are open AND have zero open blockers.
+fn count_ready_in(
+    nodes: &[AdapterNode],
+    is_closed: &dyn Fn(&str) -> bool,
+) -> usize {
+    nodes
+        .iter()
+        .filter(|n| {
+            let state = n.facts.get("state").map(|s| s.as_str()).unwrap_or("OPEN");
+            if state.eq_ignore_ascii_case("CLOSED") {
+                return false;
+            }
+            n.blocked_by.iter().all(|b| is_closed(b))
+        })
+        .count()
+}
+
+/// Push every local `blocked_by` / `blocks` edge up to the adapter as a
+/// native relationship. Each operation is idempotent — "already exists"
+/// responses are logged as success.
+fn run_sync_edges(
+    registry: &AdapterRegistry,
+    nodes: &[Node],
+    dry_run: bool,
+    as_json: bool,
+) -> Result<()> {
+    // Collect edges as a canonical (blocked, blocker) pair so mirror
+    // declarations (plan A says `blocks: [B]` AND plan B says `blocked_by:
+    // [A]`) deduplicate before we push them to the adapter. We emit every
+    // edge as the BlockedBy variant because that's what the GitHub mutation
+    // takes directly.
+    let mut edge_set: std::collections::BTreeSet<(String, String)> = Default::default();
+    for node in nodes {
+        if !registry.is_resolvable(&node.name) {
+            continue;
+        }
+        for blocker in &node.blocked_by {
+            if registry.is_resolvable(blocker) {
+                edge_set.insert((node.name.clone(), blocker.clone()));
+            }
+        }
+        for blocked in &node.blocks {
+            if registry.is_resolvable(blocked) {
+                edge_set.insert((blocked.clone(), node.name.clone()));
+            }
+        }
+    }
+    let planned: Vec<(String, String, RelationshipKind)> = edge_set
+        .into_iter()
+        .map(|(blocked, blocker)| (blocked, blocker, RelationshipKind::BlockedBy))
+        .collect();
+
+    if planned.is_empty() {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::json!({"planned": 0, "applied": 0, "dry_run": dry_run, "edges": []})
+            );
+        } else {
+            eprintln!("amos: no local edges to sync");
+        }
+        return Ok(());
+    }
+
+    let edges_json: Vec<serde_json::Value> = planned
+        .iter()
+        .map(|(from, to, kind)| {
+            serde_json::json!({
+                "from": from,
+                "to": to,
+                "kind": format!("{:?}", kind),
+            })
+        })
+        .collect();
+
+    let mut applied = 0usize;
+    let mut failed: Vec<(String, String, String)> = Vec::new();
+
+    for (from, to, kind) in &planned {
+        if dry_run {
+            if !as_json {
+                println!("- would sync: {} {:?} {}", from, kind, to);
+            }
+            continue;
+        }
+        match registry.add_relationship(from, to, *kind) {
+            Ok(()) => {
+                applied += 1;
+                if !as_json {
+                    println!("✓ {} {:?} {}", from, kind, to);
+                }
+            }
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                let lower = msg.to_ascii_lowercase();
+                if lower.contains("already") || lower.contains("duplicate") {
+                    applied += 1;
+                    if !as_json {
+                        println!("• {} {:?} {} (already exists)", from, kind, to);
+                    }
+                } else {
+                    failed.push((from.clone(), to.clone(), msg.clone()));
+                    if !as_json {
+                        eprintln!("✗ {} {:?} {}: {}", from, kind, to, msg);
+                    }
+                }
+            }
+        }
+    }
+
+    if as_json {
+        let failures: Vec<serde_json::Value> = failed
+            .iter()
+            .map(|(from, to, err)| serde_json::json!({"from": from, "to": to, "error": err}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "planned": planned.len(),
+                "applied": applied,
+                "failed": failures.len(),
+                "failures": failures,
+                "dry_run": dry_run,
+                "edges": edges_json,
+            })
+        );
+    } else {
+        eprintln!(
+            "amos: {}/{} edges synced{}",
+            applied,
+            planned.len(),
+            if !failed.is_empty() {
+                format!(", {} failed", failed.len())
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    if !failed.is_empty() && !dry_run {
+        bail!("{} relationship sync operation(s) failed", failed.len());
+    }
+    Ok(())
 }
