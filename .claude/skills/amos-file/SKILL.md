@@ -61,11 +61,46 @@ Why this matters. Constraints, prior work, related discussion.
 ## Related
 - Milestone: <name>
 - See also: #N, #M
+
+<!-- amos:ai-notes-begin -->
+## AI Agent Notes
+
+Agent-facing context that doesn't belong in the human-readable sections
+above. Include only what's useful to a future agent walking in cold:
+
+- Exact error strings, VUIDs, stack traces from the conversation that
+  led to this issue (search-fuel for lookups).
+- Concrete file paths + line numbers relevant to the fix.
+- Approaches already tried or ruled out, with the reason.
+- Hidden constraints or invariants the code enforces.
+- Pointers to adjacent amos nodes or docs (`@github:owner/repo#N`,
+  `docs/learnings/foo.md`).
+
+Skip anything already obvious from the Description or Exit criteria —
+no duplication. If there's nothing agent-specific to add, leave an
+explicit "None." so a future reader knows it wasn't forgotten.
+<!-- amos:ai-notes-end -->
 ```
 
 **Do NOT** put `Blocked by:` / `Blocks:` in the `Related` section — those are
 set via native GitHub relationships, not text. The `Related` section is for
 human context only ("see also", "context from #N", etc.).
+
+**Always include the `AI Agent Notes` section** — even on issues without
+obvious agent-specific context. It's the contract between human-filed
+issues and agents picking them up later. The HTML markers
+(`<!-- amos:ai-notes-begin -->` / `<!-- amos:ai-notes-end -->`) are
+load-bearing: they let amos tooling find and update the section without
+risking the rest of the body.
+
+### Project-specific templates
+
+If the project has its own `docs/issue-template.md` or
+`.github/ISSUE_TEMPLATE/*.md`, use its sections verbatim — **but if it
+doesn't already include an AI Agent Notes section, append one at the end
+of the body** using the marker-wrapped shape above. The section is
+non-negotiable; it's how agents and humans share context on a remote-first
+issue.
 
 ## Step 3 — Draft title + body
 
