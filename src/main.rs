@@ -120,18 +120,22 @@ fn main() -> Result<()> {
         return run_issue_create(&registry, scheme, spec, cli.json);
     }
 
-    // Scan + parse. Scanning is optional for commands that only talk to the
-    // adapter — SyncEdges and Milestones (adapter-first) work without local
-    // nodes, but we still scan so status/focus helpers have a consistent
-    // scan_root to anchor on.
+    // Scan + parse. With adapter-first enumeration, most queries (graph,
+    // next, blocked, orphans, milestones) pull their node set from the
+    // adapter when a milestone is focused — a project can be fully
+    // remote-first with zero local plan files and still be usable.
     let blocks = scanner::scan_directory(&scan_root)
         .with_context(|| format!("scanning {}", scan_root.display()))?;
 
-    let can_run_without_local_nodes = matches!(
+    // Only commands that operate purely on local files (`validate`, the DAG
+    // dump that runs by default) require at least one local block. Every
+    // other command either reads from the adapter or reshapes state that
+    // exists independently of plan files.
+    let requires_local_blocks = matches!(
         &cli.command,
-        Some(Command::Milestones) | Some(Command::SyncEdges { .. })
+        Some(Command::Validate) | None
     );
-    if blocks.is_empty() && !can_run_without_local_nodes {
+    if blocks.is_empty() && requires_local_blocks {
         eprintln!("No amos blocks found in {}", scan_root.display());
         std::process::exit(1);
     }
