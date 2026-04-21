@@ -73,13 +73,23 @@ Filename convention: `<N>-<short-kebab-slug>.md` under `plan/`.
 
 ## Sub-skill routing
 
+- **amos-file** — file a new GitHub issue from short natural-language intent. Handles template
+  discovery, milestone inference, relationship setup, and atomic creation. Use whenever the
+  user says "file this", "open a ticket for X", "create an issue", or confirms a "want me to
+  file this?" prompt.
 - **amos-graph** — print the full dependency tree. Use for "what's open", "what's next",
   "what's blocked", "show me the roadmap", orientation queries.
+- **amos-next** — pick up and execute the next ready-to-start issue in the focused milestone,
+  end-to-end (branch, work, test, PR).
+- **amos-focus** — set or switch the current milestone focus.
 - **amos-show** — resolve a single node to full content including `@`-references. Use for
   "tell me about #N".
-- **amos-create** — scaffold a new node (user-invoked via `/amos-create`).
 - **amos-notify** — post a message to a node's source system, e.g. GitHub issue comment
   (user-invoked via `/amos-notify`).
+
+The older **amos-create** skill scaffolded a plan file for an already-existing GitHub issue.
+Since plan files are now optional and rarely needed, prefer **amos-file** for new issues and
+skip the plan file entirely.
 
 ## The CLI
 

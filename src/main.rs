@@ -3,7 +3,7 @@ use clap::Parser;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use amos::adapter::{AdapterNode, AdapterRegistry, RelationshipKind};
+use amos::adapter::{AdapterNode, AdapterRegistry, IssueSpec, RelationshipKind};
 use amos::adapter_pull;
 use amos::cli::{Cli, Command};
 use amos::dag::Dag;
@@ -110,6 +110,14 @@ fn main() -> Result<()> {
             return Ok(());
         }
         _ => {}
+    }
+
+    // Issue create talks to the adapter only — no local scan required. Route
+    // it early so projects with legacy plan-file formats can still file new
+    // issues without having to migrate first.
+    if let Some(Command::IssueCreate { scheme, spec }) = &cli.command {
+        let registry = build_registry(&scan_root, &[]);
+        return run_issue_create(&registry, scheme, spec, cli.json);
     }
 
     // Scan + parse. Scanning is optional for commands that only talk to the
@@ -458,6 +466,11 @@ fn main() -> Result<()> {
         return run_sync_edges(&registry, &nodes, *dry_run, cli.json);
     }
 
+    // Issue create — atomic create-with-relationships from a JSON spec.
+    if let Some(Command::IssueCreate { scheme, spec }) = &cli.command {
+        return run_issue_create(&registry, scheme, spec, cli.json);
+    }
+
     // Default: dump the DAG
     eprintln!("amos: {} nodes", dag.all_nodes().len());
     print!("{}", output::format_dag(&dag, &registry));
@@ -683,6 +696,129 @@ fn count_ready_in(
             n.blocked_by.iter().all(|b| is_closed(b))
         })
         .count()
+}
+
+/// Create a new issue from a JSON spec, then atomically apply native
+/// relationship edges. Returns the URL + canonical amos name so a calling
+/// skill can reference the newly-created issue immediately.
+fn run_issue_create(
+    registry: &AdapterRegistry,
+    scheme: &str,
+    spec_path: &str,
+    as_json: bool,
+) -> Result<()> {
+    let raw = if spec_path == "-" {
+        let mut buf = String::new();
+        use std::io::Read;
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading spec from stdin")?;
+        buf
+    } else {
+        std::fs::read_to_string(spec_path)
+            .with_context(|| format!("reading spec from {}", spec_path))?
+    };
+
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .context("parsing issue spec JSON")?;
+
+    let spec = IssueSpec {
+        title: parsed
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        body: parsed
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        milestone: parsed
+            .get("milestone")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        labels: json_string_array(&parsed, "labels"),
+        blocked_by: json_string_array(&parsed, "blocked_by"),
+        blocks: json_string_array(&parsed, "blocks"),
+        sub_issue_of: parsed
+            .get("sub_issue_of")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    };
+
+    let created = registry
+        .create_issue(scheme, &spec)
+        .context("creating issue")?;
+
+    // Apply relationships. Failures don't undo the issue creation (the
+    // issue is already there); we report them in the result so the caller
+    // can decide whether to retry.
+    let mut relationship_failures: Vec<(String, String, String)> = Vec::new();
+    for blocker in &spec.blocked_by {
+        if let Err(e) = registry.add_relationship(&created.name, blocker, RelationshipKind::BlockedBy) {
+            relationship_failures.push((
+                created.name.clone(),
+                blocker.clone(),
+                format!("{:#}", e),
+            ));
+        }
+    }
+    for blocked in &spec.blocks {
+        if let Err(e) = registry.add_relationship(&created.name, blocked, RelationshipKind::Blocks) {
+            relationship_failures.push((
+                created.name.clone(),
+                blocked.clone(),
+                format!("{:#}", e),
+            ));
+        }
+    }
+    if let Some(parent) = &spec.sub_issue_of {
+        if let Err(e) = registry.add_relationship(&created.name, parent, RelationshipKind::SubIssueOf) {
+            relationship_failures.push((
+                created.name.clone(),
+                parent.clone(),
+                format!("{:#}", e),
+            ));
+        }
+    }
+
+    if as_json {
+        let failures_json: Vec<serde_json::Value> = relationship_failures
+            .iter()
+            .map(|(f, t, e)| serde_json::json!({"from": f, "to": t, "error": e}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "name": created.name,
+                "number": created.number,
+                "url": created.url,
+                "relationship_failures": failures_json,
+            })
+        );
+    } else {
+        println!("amos: created {} — {}", created.name, created.url);
+        if !relationship_failures.is_empty() {
+            eprintln!("amos: {} relationship(s) failed to apply:", relationship_failures.len());
+            for (f, t, e) in &relationship_failures {
+                eprintln!("  {} → {}: {}", f, t, e);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Push every local `blocked_by` / `blocks` edge up to the adapter as a

@@ -106,4 +106,16 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Create a new issue in the adapter's backing system from a JSON spec,
+    /// applying milestone, labels, and native relationships in one call.
+    /// The spec shape matches `IssueSpec` (see `amos --help issue create`
+    /// for the schema).
+    IssueCreate {
+        /// Adapter scheme. Default is "github".
+        #[arg(long, default_value = "github")]
+        scheme: String,
+        /// Path to JSON spec file. Use "-" (default) for stdin.
+        #[arg(long, default_value = "-")]
+        spec: String,
+    },
 }

@@ -66,6 +66,34 @@ pub enum RelationshipKind {
     SubIssueOf,
 }
 
+/// Declarative issue spec passed to `create_issue`. Lets the `amos-file`
+/// skill produce a draft, show it to the user, and hand off a single
+/// structured payload for atomic creation.
+#[derive(Debug, Clone, Default)]
+pub struct IssueSpec {
+    pub title: String,
+    pub body: String,
+    pub milestone: Option<String>,
+    pub labels: Vec<String>,
+    /// References of nodes this one is blocked by (canonical names).
+    pub blocked_by: Vec<String>,
+    /// References this one blocks.
+    pub blocks: Vec<String>,
+    /// If set, the new issue is a sub-issue of this one.
+    pub sub_issue_of: Option<String>,
+}
+
+/// Result of a successful issue creation.
+#[derive(Debug, Clone)]
+pub struct CreatedIssue {
+    /// Canonical amos name (e.g. `@github:tatolab/streamlib#395`).
+    pub name: String,
+    /// Tracker-specific issue number.
+    pub number: u64,
+    /// URL users can click to view the issue.
+    pub url: String,
+}
+
 /// Adapter trait — resolves URIs within a registered scheme.
 ///
 /// An adapter handles a URI scheme (e.g. `gh:`, `jira:`, `linear:`).
@@ -125,6 +153,16 @@ pub trait Adapter: Send + Sync {
         _kind: RelationshipKind,
     ) -> Result<()> {
         bail!("adapter does not support creating relationships")
+    }
+
+    /// Create a new issue/task in the backing system. Returns the canonical
+    /// amos name + tracker-specific number + clickable URL. Milestone,
+    /// labels, and relationships in the spec are applied atomically — if
+    /// any relationship fails, creation is still reported as successful but
+    /// the error is attached to the partial-failure list returned by the
+    /// caller.
+    fn create_issue(&self, _spec: &IssueSpec) -> Result<CreatedIssue> {
+        bail!("adapter does not support creating issues")
     }
 }
 
@@ -225,6 +263,16 @@ impl AdapterRegistry {
             }
         }
         out
+    }
+
+    /// Create a new issue via the named adapter scheme (e.g. "github"). The
+    /// caller decides which scheme to use — there's no inference from the
+    /// issue body, since a brand-new issue has no canonical name yet.
+    pub fn create_issue(&self, scheme: &str, spec: &IssueSpec) -> Result<CreatedIssue> {
+        let Some(adapter) = self.adapters.get(scheme) else {
+            bail!("no adapter registered for scheme '{}'", scheme);
+        };
+        adapter.create_issue(spec)
     }
 
     /// Add a native relationship via the adapter that owns `from`.

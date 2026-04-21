@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
-use crate::adapter::{Adapter, AdapterNode, MilestoneInfo, RelationshipKind, ResourceFields};
+use crate::adapter::{
+    Adapter, AdapterNode, CreatedIssue, IssueSpec, MilestoneInfo, RelationshipKind, ResourceFields,
+};
 use crate::url_adapter::download_to_cache;
 
 /// GitHub adapter — resolves `gh:` URIs via the `gh` CLI.
@@ -498,6 +500,13 @@ impl Adapter for GhAdapter {
         };
         add_relationship_graphql(repo, from_num, to_num, kind)
     }
+
+    fn create_issue(&self, spec: &IssueSpec) -> Result<CreatedIssue> {
+        let Some(repo) = self.default_repo.as_deref() else {
+            bail!("no default repo — run inside a git checkout or configure one");
+        };
+        create_issue_via_gh(repo, spec)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +859,42 @@ fn split_repo(repo: &str) -> Result<(&str, &str)> {
         .ok_or_else(|| anyhow::anyhow!("malformed repo '{}', expected owner/name", repo))
 }
 
+/// Create a new GitHub issue via `gh issue create`. Applies title + body
+/// + milestone + labels in the same call; relationships are separate
+/// mutations the caller runs afterward.
+fn create_issue_via_gh(repo: &str, spec: &IssueSpec) -> Result<CreatedIssue> {
+    if spec.title.trim().is_empty() {
+        bail!("issue title is empty");
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["issue", "create", "--repo", repo]);
+    cmd.args(["--title", &spec.title]);
+    cmd.args(["--body", &spec.body]);
+    if let Some(ms) = &spec.milestone {
+        cmd.args(["--milestone", ms]);
+    }
+    for label in &spec.labels {
+        cmd.args(["--label", label]);
+    }
+
+    let output = cmd.output().context("failed to spawn 'gh issue create'")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh issue create failed: {}", stderr.trim());
+    }
+    // gh prints the issue URL to stdout on success.
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let number = url
+        .rsplit_once('/')
+        .and_then(|(_, n)| n.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("couldn't parse issue number from gh output: {}", url))?;
+    Ok(CreatedIssue {
+        name: format!("@github:{}#{}", repo, number),
+        number,
+        url,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,6 +972,17 @@ mod tests {
             node.facts.get("milestone").map(|s| s.as_str()),
             Some("Some Milestone")
         );
+    }
+
+    #[test]
+    fn create_issue_rejects_empty_title() {
+        let spec = IssueSpec {
+            title: "   ".to_string(),
+            body: "Some body".to_string(),
+            ..Default::default()
+        };
+        let err = create_issue_via_gh("tatolab/amos", &spec).unwrap_err();
+        assert!(format!("{}", err).contains("title is empty"));
     }
 
     #[test]
