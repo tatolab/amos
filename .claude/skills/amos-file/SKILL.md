@@ -164,14 +164,31 @@ labels cause routing confusion.
 
 ## Step 6 — Detect relationships
 
-Scan the user's intent + conversation for explicit signals:
+**Only four relationship types go into native GitHub relations.** If a
+reference doesn't fit one of these, it's free-text context — don't try
+to force it into a native edge.
 
-- "this blocks #322", "depends on #310", "after #300 lands"
-- "sub-issue of #319", "part of the #319 umbrella"
-- "related to #302" → goes in the `Related` section as plain text, not a native
-  relationship
+| Intent | Native relation | Pattern to match |
+| --- | --- | --- |
+| A can't start until B is done | `blocked_by` on A | "blocked by #N", "depends on #N", "waits on #N", "after #N lands" |
+| A must land before B can start | `blocks` on A | "this blocks #N", "gates #N", "prerequisite for #N" |
+| A is a concrete child under umbrella B | `sub_issue_of` on A | "sub-issue of #N", "part of the #N umbrella", "child of #N", "Parent: #N" |
+| A is the same issue as B | `duplicate` of (not yet supported by amos) | "duplicate of #N", "duplicates #N" |
 
-For each explicit mention, turn into a structured edge:
+**Everything else stays as free-text in the `Related` section** — or
+gets dropped entirely. Phrases like "exposed by", "surfaced by",
+"follow-up to", "see also", "related to", "in the same cluster as"
+are soft references with no GitHub-native equivalent. If they don't
+affect work order, don't call them out at all.
+
+Rule of thumb: **if a reference doesn't fit the table above, it's
+probably not a relationship worth calling out.** The value of a native
+relation is that `amos next` / `amos blocked` will respect it and
+order work correctly. Free-text refs are just noise the next agent
+has to mentally filter.
+
+For each matching reference, turn it into a structured edge in the
+spec:
 
 ```json
 {
@@ -181,8 +198,9 @@ For each explicit mention, turn into a structured edge:
 }
 ```
 
-If the intent implies a dependency but doesn't say the direction clearly, ask
-via `AskUserQuestion` — wrong-direction edges are painful to unwind.
+If the intent implies a dependency but doesn't say the direction
+clearly, ask via `AskUserQuestion` — wrong-direction edges are painful
+to unwind (they create cycle errors on any later correction).
 
 ## Step 7 — Approval gate (mandatory)
 
