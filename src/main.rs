@@ -742,6 +742,10 @@ fn run_issue_create(
             .and_then(|v| v.as_str())
             .map(String::from),
         labels: json_string_array(&parsed, "labels"),
+        issue_type: parsed
+            .get("issue_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         blocked_by: json_string_array(&parsed, "blocked_by"),
         blocks: json_string_array(&parsed, "blocks"),
         sub_issue_of: parsed

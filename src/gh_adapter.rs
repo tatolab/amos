@@ -860,8 +860,8 @@ fn split_repo(repo: &str) -> Result<(&str, &str)> {
 }
 
 /// Create a new GitHub issue via `gh issue create`. Applies title + body
-/// + milestone + labels in the same call; relationships are separate
-/// mutations the caller runs afterward.
+/// + milestone + labels in the same call; relationships + issue type are
+/// separate mutations the caller runs afterward.
 fn create_issue_via_gh(repo: &str, spec: &IssueSpec) -> Result<CreatedIssue> {
     if spec.title.trim().is_empty() {
         bail!("issue title is empty");
@@ -888,11 +888,82 @@ fn create_issue_via_gh(repo: &str, spec: &IssueSpec) -> Result<CreatedIssue> {
         .rsplit_once('/')
         .and_then(|(_, n)| n.parse::<u64>().ok())
         .ok_or_else(|| anyhow::anyhow!("couldn't parse issue number from gh output: {}", url))?;
+
+    if let Some(type_name) = &spec.issue_type {
+        set_issue_type_by_name(repo, number, type_name)?;
+    }
+
     Ok(CreatedIssue {
         name: format!("@github:{}#{}", repo, number),
         number,
         url,
     })
+}
+
+/// Apply a repository-level issue type (e.g. "Bug", "Feature", "Task") to
+/// an already-created issue. `gh issue create` doesn't support `--type`,
+/// so we set it via the `updateIssueIssueType` mutation.
+fn set_issue_type_by_name(repo: &str, number: u64, type_name: &str) -> Result<()> {
+    let issue_id = fetch_issue_node_id(repo, number)?;
+    let types = fetch_issue_types_graphql(repo)?;
+    let type_id = types
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(type_name))
+        .map(|(_, id)| id.clone())
+        .ok_or_else(|| {
+            let available: Vec<&str> = types.iter().map(|(n, _)| n.as_str()).collect();
+            anyhow::anyhow!(
+                "issue type '{}' not configured on {} (available: {})",
+                type_name,
+                repo,
+                available.join(", ")
+            )
+        })?;
+    let query = r#"
+        mutation($issue: ID!, $type: ID!) {
+          updateIssueIssueType(input: {issueId: $issue, issueTypeId: $type}) {
+            issue { number }
+          }
+        }
+    "#;
+    run_graphql(query, &[("issue", &issue_id), ("type", &type_id)])?;
+    Ok(())
+}
+
+/// Fetch the repository's configured issue types. Returns [(name, id)]
+/// pairs. Repo admins manage the list — amos doesn't create types itself.
+fn fetch_issue_types_graphql(repo: &str) -> Result<Vec<(String, String)>> {
+    let (owner, name) = split_repo(repo)?;
+    let query = r#"
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            issueTypes(first: 50) { nodes { id name } }
+          }
+        }
+    "#;
+    let response = run_graphql(query, &[("owner", owner), ("name", name)])?;
+    let nodes = response
+        .pointer("/data/repository/issueTypes/nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let name = node
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = node
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() && !id.is_empty() {
+            out.push((name, id));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

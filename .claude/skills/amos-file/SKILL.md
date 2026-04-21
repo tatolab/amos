@@ -147,6 +147,52 @@ label → "Polyglot SDK Realignment" milestone on streamlib). **Confidence tiers
   If the user picks "I'll tell you", ask for the title and validate it against
   the `amos milestones` list.
 
+## Step 4.5 — Infer the issue type
+
+GitHub has three repo-level issue types: **Bug**, **Feature**, **Task**.
+They're separate from labels and render with distinct icons in the UI.
+Amos passes `issue_type` through to `gh`'s `updateIssueIssueType`
+mutation — if the repo has the type configured, the new issue picks
+it up.
+
+Fetch available types (usually this is the standard three, but
+projects sometimes add more):
+
+```bash
+gh api graphql -f query='{
+  repository(owner:"<owner>",name:"<repo>") {
+    issueTypes(first:10) { nodes { name description } }
+  }
+}' | jq '.data.repository.issueTypes.nodes[]'
+```
+
+Infer from the draft:
+
+- **Bug** — describes a thing that is broken, throws an error, crashes,
+  fails a test, produces wrong output, regresses from a prior working
+  state. Conventional-commit prefix `fix(...)`.
+- **Feature** — a new capability that doesn't exist yet. Not a fix, not
+  maintenance. Conventional-commit prefix `feat(...)`.
+- **Task** — everything else. Chores, refactors, docs, research,
+  rollup retests, CI work, dependency bumps. Conventional-commit
+  prefixes `chore(...)`, `refactor(...)`, `docs(...)`, `test(...)`,
+  `perf(...)`, or no prefix for umbrellas and research tickets.
+
+If confidence is high (conventional-commit prefix matches cleanly),
+just set the type. If the draft title has no prefix and the content is
+ambiguous (e.g., "improve the caching story"), fall back to
+`AskUserQuestion`:
+
+```
+What type of issue is this?
+[ 1 ] Bug — something is broken
+[ 2 ] Feature — new capability
+[ 3 ] Task — maintenance, refactor, research, etc.
+```
+
+If the repo doesn't have any issue types configured, omit the field —
+the binary will skip the mutation cleanly.
+
 ## Step 5 — Infer labels
 
 ```bash
@@ -210,6 +256,7 @@ Present the draft in full, then `AskUserQuestion`:
 Ready to file this issue?
 
 Title:      <title>
+Type:       <issue_type or "none">
 Milestone:  <milestone or "none">
 Labels:     <label1, label2, ...>
 Blocked by: <list, or "none">
@@ -222,10 +269,11 @@ Parent:     <sub_issue_of, or "none">
 
 [ 1 ] File it as shown
 [ 2 ] Change the title
-[ 3 ] Change the milestone
-[ 4 ] Edit the body
-[ 5 ] Fix the relationships
-[ 6 ] Cancel
+[ 3 ] Change the type
+[ 4 ] Change the milestone
+[ 5 ] Edit the body
+[ 6 ] Fix the relationships
+[ 7 ] Cancel
 ```
 
 If the user picks anything but "File it as shown", iterate on the relevant
@@ -240,8 +288,9 @@ cat > /tmp/amos-spec.json <<'JSON'
 {
   "title": "fix(python): ...",
   "body": "## Description\n...",
+  "issue_type": "Bug",
   "milestone": "Polyglot SDK Realignment",
-  "labels": ["bug", "polyglot"],
+  "labels": ["polyglot"],
   "blocked_by": ["@github:tatolab/streamlib#322"],
   "blocks": [],
   "sub_issue_of": null

@@ -75,6 +75,10 @@ pub struct IssueSpec {
     pub body: String,
     pub milestone: Option<String>,
     pub labels: Vec<String>,
+    /// GitHub issue type — e.g. "Bug", "Feature", "Task". Case-insensitive
+    /// match against the repo's configured issue types. `None` leaves the
+    /// type unset.
+    pub issue_type: Option<String>,
     /// References of nodes this one is blocked by (canonical names).
     pub blocked_by: Vec<String>,
     /// References this one blocks.
