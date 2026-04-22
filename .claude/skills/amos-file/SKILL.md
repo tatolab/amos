@@ -6,18 +6,42 @@ description: >
   says "file this", "open an issue for X", "create a ticket", "log this as a bug",
   when discussion surfaces a new task that should be tracked, or after the
   assistant offered to file something and the user confirmed. Infers milestone
-  and labels; uses AskUserQuestion whenever confidence is low.
-allowed-tools: Bash, Read, Write, AskUserQuestion, Glob, Grep
+  and labels; asks in chat whenever confidence is low.
+allowed-tools: Bash, Read, Write, Glob, Grep
 ---
 
 # Filing a new issue
 
 Your job is to produce a consistent, well-shaped GitHub issue from minimal input,
 so the user never has to hand-author a full template. You draft; the user approves
-via `AskUserQuestion`; amos executes atomically.
+in chat; amos executes atomically.
 
 Never skip the approval gate. Never execute a create on a draft the user hasn't
 seen in full.
+
+## Approval gates: ask in chat, do not call AskUserQuestion
+
+Every gate in this skill — disambiguation questions, milestone selection, type
+selection, relationship direction, final pre-file approval — is a **plain-text
+question in the chat**, not an `AskUserQuestion` tool call.
+
+Reasons:
+- `AskUserQuestion` holds a permission stream open while waiting for the user
+  to click. Long-running drafts (issue bodies of several thousand chars) plus
+  human deliberation time routinely exceed the stream's idle timeout, killing
+  the session with `Tool permission stream closed before response received`.
+  This is especially common when driving Claude Code remotely (Telegram bridge,
+  SDK CLI), and it loses the entire drafting context.
+- A text question costs nothing — the harness handles the wait naturally as
+  part of normal turn-taking. Each user reply is a fresh inbound message, no
+  held-open IPC.
+
+**Mechanics for every gate below:**
+1. Print the question and the numbered options as plain Markdown.
+2. End your turn — do not call any further tool, do not narrate "waiting for
+   your reply".
+3. The user's next message is the answer. Parse it (a bare number, a label
+   from the option list, or free-form text) and continue.
 
 ## Step 1 — Capture intent
 
@@ -27,9 +51,10 @@ Use whatever the user already gave you:
 - A conversation thread where a bug/task surfaced
 - A prior assistant prompt ("want me to file this?") + the user saying yes
 
-If the intent is too vague to produce a draft, ask one concrete question via
-`AskUserQuestion` — e.g. "Should this be a bug report, a feature request, or a
-research task?" — rather than guessing and generating a bad draft.
+If the intent is too vague to produce a draft, ask one concrete question in
+chat — e.g. "Should this be a bug report, a feature request, or a research
+task?" — rather than guessing and generating a bad draft. Use the chat-gate
+mechanics above (plain text, end turn, wait for reply).
 
 ## Step 2 — Discover the template
 
@@ -121,7 +146,7 @@ Body rules:
 - If the intent came from a debugging thread, copy the exact error strings / VUIDs
   / stack traces into `Context` — they're search-fuel for future lookups.
 
-## Step 4 — Infer milestone (with AskUserQuestion fallback)
+## Step 4 — Infer milestone (with chat fallback)
 
 ```bash
 "$HOME/.local/bin/amos" milestones --json --dir <project-root> | jq '.milestones[] | .title'
@@ -133,19 +158,20 @@ label → "Polyglot SDK Realignment" milestone on streamlib). **Confidence tiers
 - **High** — one milestone's title or scope contains a core concept from the
   draft (exact word match on a distinctive term). Use it.
 - **Medium / low / ambiguous** — two or more candidates look plausible, or
-  none clearly match. Call `AskUserQuestion`:
+  none clearly match. Ask in chat (per the gate mechanics in the intro):
 
   ```
   Which milestone should this go in?
-  [ 1 ] <candidate 1 title>
-  [ 2 ] <candidate 2 title>
-  [ 3 ] <candidate 3 title>
-  [ 4 ] None of these / I'll tell you
-  [ 5 ] No milestone (orphan)
+
+  1. <candidate 1 title>
+  2. <candidate 2 title>
+  3. <candidate 3 title>
+  4. None of these — I'll tell you the title
+  5. No milestone (orphan)
   ```
 
-  If the user picks "I'll tell you", ask for the title and validate it against
-  the `amos milestones` list.
+  Then end your turn. If the user picks "I'll tell you", validate the title
+  they give against the `amos milestones` list before continuing.
 
 ## Step 4.5 — Infer the issue type
 
@@ -180,14 +206,15 @@ Infer from the draft:
 
 If confidence is high (conventional-commit prefix matches cleanly),
 just set the type. If the draft title has no prefix and the content is
-ambiguous (e.g., "improve the caching story"), fall back to
-`AskUserQuestion`:
+ambiguous (e.g., "improve the caching story"), ask in chat (per the gate
+mechanics in the intro) and end your turn:
 
 ```
 What type of issue is this?
-[ 1 ] Bug — something is broken
-[ 2 ] Feature — new capability
-[ 3 ] Task — maintenance, refactor, research, etc.
+
+1. Bug — something is broken
+2. Feature — new capability
+3. Task — maintenance, refactor, research, etc.
 ```
 
 If the repo doesn't have any issue types configured, omit the field —
@@ -245,12 +272,15 @@ spec:
 ```
 
 If the intent implies a dependency but doesn't say the direction
-clearly, ask via `AskUserQuestion` — wrong-direction edges are painful
-to unwind (they create cycle errors on any later correction).
+clearly, ask in chat (per the gate mechanics in the intro) and end
+your turn — wrong-direction edges are painful to unwind (they create
+cycle errors on any later correction).
 
-## Step 7 — Approval gate (mandatory)
+## Step 7 — Approval gate (mandatory, in chat)
 
-Present the draft in full, then `AskUserQuestion`:
+Present the draft in full as plain Markdown in your message, then list the
+options and **end your turn**. Do NOT call `AskUserQuestion` — see the
+intro's "Approval gates" section for why.
 
 ```
 Ready to file this issue?
@@ -267,17 +297,23 @@ Parent:     <sub_issue_of, or "none">
 <body>
 ---
 
-[ 1 ] File it as shown
-[ 2 ] Change the title
-[ 3 ] Change the type
-[ 4 ] Change the milestone
-[ 5 ] Edit the body
-[ 6 ] Fix the relationships
-[ 7 ] Cancel
+Reply with one of:
+
+1. File it as shown
+2. Change the title
+3. Change the type
+4. Change the milestone
+5. Edit the body — name the section
+6. Fix the relationships
+7. Cancel
+
+Or describe the change you want in your own words.
 ```
 
-If the user picks anything but "File it as shown", iterate on the relevant
-field and re-show the full draft before asking again.
+After printing the options, end your turn — no further tool calls. The
+user's next message is the answer. If they pick anything but option 1,
+iterate on the relevant field and re-show the full draft before asking
+again.
 
 ## Step 8 — Execute atomically
 
