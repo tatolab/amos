@@ -93,9 +93,55 @@ read every matching file into context. Those specialty workflows carry
 mandatory rules for the kind of work (`ci`, `video-e2e`, `macos`,
 `polyglot`, `research`, etc.).
 
+## Step 2.5 — Verify against current state (staleness check)
+
+**Issues are goals, not specs.** The body — exit criteria, suggested
+file paths, AI Agent Notes, ruled-out approaches, related-issue
+references — captures the best understanding when the issue was
+filed. Code lands, dependencies close, architectures shift; by the
+time you pick the issue up, parts of the body may be stale.
+
+Before announcing a plan, audit the issue body against current code
+and current issue state. For each load-bearing claim in the body,
+check:
+
+- **Referenced files / code paths** still exist in the shape claimed.
+  If the body says "edit X in module Y," confirm Y still exists and
+  X is still where it says.
+- **Cited "defects" or "missing features"** are still real. PRs that
+  landed since filing may have already addressed them.
+- **Suggested follow-up issues** haven't already been filed. If the
+  body says "file three implementation issues," check whether
+  `gh issue list` already shows them — they may exist with
+  `blocked_by: #<this>`.
+- **Dependency edges** match GitHub. If the body claims a `Blocked
+  by` relationship, confirm it via `amos show`.
+- **AI Agent Notes** still reflect reality. Strike-out items that
+  are no longer true (per the markdown-editing rules in CLAUDE.md —
+  preserve disagreement, don't silently overwrite).
+
+Use the Agent tool with `subagent_type=Explore` for non-trivial
+verification across multiple files; for narrow lookups, Grep / Read /
+`gh issue view` directly.
+
+If you find staleness, update the issue body in place via
+`gh issue edit <N> --body-file ...` with strike-throughs and reasoning
+preserved. Do this *before* announcing the plan, so the announcement
+references a clean issue body and a future picker doesn't have to
+re-derive the same dead ends.
+
+The plan you announce in Step 3 is the **fresh plan**, not a
+regurgitation of the issue body. Where the body and current evidence
+disagree, the plan goes with current evidence (and explicitly notes
+what changed and why).
+
 ## Step 3 — Announce + gate on confirmation
 
-Compose a short announcement in English (not JSON). Example shape:
+Compose a short announcement in English (not JSON). The plan you
+announce is the *fresh* plan from Step 2.5 — exit criteria, files in
+scope, and tests are what *current state* dictates, not what the
+issue body literally says (where the two diverge, lead with the
+fresh plan and call out the divergence). Example shape:
 
 ```
 ## Starting Task
@@ -105,10 +151,13 @@ Compose a short announcement in English (not JSON). Example shape:
 - **Labels**: <labels, or "none">
 - **Loaded workflows**: <files read, or "none">
 - **Branch**: `<branch-name>`
-- **Summary**: <1–2 sentence plan from the Description section>
-- **Exit criteria**: <N items from the Exit criteria section>
-- **Test gate**: <list of tests to run from the Tests/validation section>
-- **Files in scope**: <from issue + workflows>
+- **Goal** (paraphrased from issue): <1–2 sentences>
+- **Refined plan** (after Step 2.5 staleness check):
+  - Exit criteria: <fresh, current-state-aware deliverables>
+  - Files in scope: <from current code, not just issue body>
+  - Test shape: <from issue + workflows, refined for current state>
+- **What changed vs. issue body**: <list of items struck out,
+  references that have moved, or "no divergence">
 - **Scope estimate**: small | medium | large
 
 Proceed? [y/n]
@@ -128,8 +177,10 @@ from the conventional-commit family.
 
 ## Step 5 — Do the work
 
-- Scope: strictly the Exit criteria. Note anything else as follow-up,
-  don't touch.
+- Scope: the **goal as refined in Step 3's plan**, not a literal
+  reading of every checkbox in the issue body. If the body says
+  "do X, Y, Z" and Step 2.5 found Y is already done, skip Y.
+- Note anything genuinely out of scope as a follow-up, don't touch.
 - Honor `CLAUDE.md` + every loaded workflow file.
 - `cargo check` (or project equivalent) frequently.
 - Conventional commits. Never commit broken code.
@@ -154,7 +205,27 @@ Don't push until the gate is green. If a listed test can't run in this
 environment (no GPU CI, etc.), mark ⏭ skipped with a clear reason and
 note that CI must catch it.
 
-## Step 7 — Push + open PR
+## Step 7 — Pre-PR review gate (automatic)
+
+**Do not ask the user "open PR? [y/n]".** Invoke the `pr-review-gate`
+skill with the branch's diff and the issue context; use its verdict to
+decide what happens next:
+
+- **PASS** — proceed straight to Step 8 (push + open PR). Print one
+  line like "Review passed — opening PR."
+- **FIX** — apply the listed fixes on this branch, re-run the test
+  gate (Step 6), commit with message `review: address pr-review-gate
+  feedback`, and re-invoke `pr-review-gate`. Cap the loop at 3
+  iterations; on the 4th, treat as DISCUSS.
+- **DISCUSS** — surface the reviewer's rationale verbatim and ask the
+  user: "Want me to fix these or open the PR anyway?" Do not proceed
+  without an explicit answer.
+
+The gate is intentionally narrow — it only decides whether to open the
+PR. Merge decisions, follow-up filing, and broader discussion stay
+with the user at Step 9.
+
+## Step 8 — Push + open PR
 
 Before creating the PR, collect **every** issue the branch addresses — not just
 the primary one from Step 1 — so GitHub auto-closes all of them on merge.
@@ -209,7 +280,7 @@ EOF
 One `Closes #N` per line — GitHub's auto-close parser only fires on that
 exact shape. `Closes #1, #2, #3` on one line does NOT work.
 
-## Step 8 — Report back
+## Step 9 — Report back
 
 English summary, not JSON:
 
