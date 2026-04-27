@@ -67,45 +67,78 @@ Look, in order:
 
 Read the file. Follow its section headers verbatim. Don't invent new sections.
 
-### Amos default template
+### Amos default template — keep it low-resolution
+
+Issues capture **goals**, not pre-implementation plans. The picker
+will research current state at pickup time and produce the
+high-resolution plan; specifics in the issue body just create
+staleness for the next agent to clean up. Resist the urge to be
+exhaustive. Phrase claims about specific code or behavior as "to
+the best of our current knowledge" so the picker knows to verify.
 
 ```markdown
 ## Description
-One short paragraph, written for an AI agent with no prior context.
+One short paragraph stating the goal — *what* this issue delivers
+and roughly *how* done looks. Written for a future agent picking
+this up cold. No file paths, no implementation ordering, no
+ruled-out approaches.
 
 ## Context
-Why this matters. Constraints, prior work, related discussion.
+Why this matters and what constraints bound the work. Phrase
+specific code/behavior claims as "to the best of our current
+knowledge" — the picker is required to verify against current
+state, not trust the body verbatim.
 
 ## Exit criteria
-- [ ] <concrete deliverable>
-- [ ] <concrete deliverable>
+2–4 high-level deliverables that define "done." The picker
+expands them into a detailed plan.
+
+- [ ] <high-level deliverable>
+- [ ] <high-level deliverable>
 
 ## Tests / validation
-- [ ] <inline test case>  OR  "Blocked by #N (test harness)"
+The *shape* of validation needed, not exact test names.
+
+- [ ] Unit test(s) covering <what behavior>
+- [ ] E2E scenario: <one-line description>
+
+OR — "Blocked by #N (test harness)"
 
 ## Related
 - Milestone: <name>
-- See also: #N, #M
+- See also: #N (free-text only — dependency edges go through native
+  GitHub relationships)
 
 <!-- amos:ai-notes-begin -->
 ## AI Agent Notes
 
-Agent-facing context that doesn't belong in the human-readable sections
-above. Include only what's useful to a future agent walking in cold:
+None.
 
-- Exact error strings, VUIDs, stack traces from the conversation that
-  led to this issue (search-fuel for lookups).
-- Concrete file paths + line numbers relevant to the fix.
-- Approaches already tried or ruled out, with the reason.
-- Hidden constraints or invariants the code enforces.
-- Pointers to adjacent amos nodes or docs (`@github:owner/repo#N`,
-  `docs/learnings/foo.md`).
-
-Skip anything already obvious from the Description or Exit criteria —
-no duplication. If there's nothing agent-specific to add, leave an
-explicit "None." so a future reader knows it wasn't forgotten.
 <!-- amos:ai-notes-end -->
 ```
+
+**Default the AI Agent Notes section to "None."** It exists for
+things a future picker genuinely cannot derive from current code —
+a hidden invariant, a ruled-out approach with reasoning, a
+non-obvious gotcha. If you're tempted to fill it with file paths,
+ordering suggestions, or "implementation hints," **don't** —
+those go stale fast and burden the picker with corrections.
+
+Examples of content that *does* belong in AI Agent Notes:
+
+- An exact error string / VUID / stack trace from a debugging
+  conversation (search-fuel that survives refactors).
+- A ruled-out approach with the *reason* it was ruled out (so the
+  picker doesn't redo the dead-end).
+- A hidden invariant the code enforces but doesn't document.
+
+Examples of content that does *not* belong (will go stale):
+
+- "File this PR sequentially after #X."
+- "Suggested order: A, B, C."
+- "Edit `foo/bar.rs` line 137."
+- "Check that VulkanReadView still impls CpuReadable."
+- A summary of an investigation the picker could redo themselves.
 
 **Do NOT** put `Blocked by:` / `Blocks:` in the `Related` section — those are
 set via native GitHub relationships, not text. The `Related` section is for
