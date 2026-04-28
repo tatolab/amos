@@ -101,9 +101,28 @@ references — captures the best understanding when the issue was
 filed. Code lands, dependencies close, architectures shift; by the
 time you pick the issue up, parts of the body may be stale.
 
-Before announcing a plan, audit the issue body against current code
-and current issue state. For each load-bearing claim in the body,
-check:
+**This step is reasoning-heavy and must run on Opus.** You're already
+on Opus when executing `amos-next` directly — keep it that way for
+the staleness check. Whenever you delegate verification to a
+subagent, **always pass `model: "opus"`**; never let this step fall
+back to Sonnet. Sonnet applies surface rules and misses real
+architectural drift, contradicts hard-won research in the issue body
+(prior `research`-labeled work, AI Agent Notes that the user wrote
+deliberately), and produces low-value findings. The user has
+explicitly opted in to Opus everywhere reasoning is needed; honor
+that.
+
+**Use max effort.** Read the full issue body. Read every file the
+body references — not skim, full read. Treat the AI Agent Notes as
+**hard-won research the user wants preserved**, not suggestions to
+override. If you find a contradiction between the body and current
+code, your default is "the body is right and current code is the
+drift," not the other way around — only flip that default when the
+evidence is unambiguous (the file the body names is gone, the PR
+the body references closed and removed the cited code, etc.).
+
+Audit the issue body against current code and current issue state.
+For each load-bearing claim in the body, check:
 
 - **Referenced files / code paths** still exist in the shape claimed.
   If the body says "edit X in module Y," confirm Y still exists and
@@ -118,11 +137,17 @@ check:
   by` relationship, confirm it via `amos show`.
 - **AI Agent Notes** still reflect reality. Strike-out items that
   are no longer true (per the markdown-editing rules in CLAUDE.md —
-  preserve disagreement, don't silently overwrite).
+  preserve disagreement, don't silently overwrite). **Do not strike
+  items merely because they conflict with your own first
+  impression** — only when current code or current issue state
+  proves them wrong.
 
-Use the Agent tool with `subagent_type=Explore` for non-trivial
-verification across multiple files; for narrow lookups, Grep / Read /
-`gh issue view` directly.
+For non-trivial verification across multiple files, spawn parallel
+Opus subagents (one per concern, in a single message) with
+`subagent_type=general-purpose` and `model: "opus"`. Use
+`subagent_type=Explore` only for narrow lookups (find-this-file,
+find-this-symbol). Never use the default model for a Step 2.5
+subagent — explicitly pass `model: "opus"`.
 
 If you find staleness, update the issue body in place via
 `gh issue edit <N> --body-file ...` with strike-throughs and reasoning
@@ -133,7 +158,11 @@ re-derive the same dead ends.
 The plan you announce in Step 3 is the **fresh plan**, not a
 regurgitation of the issue body. Where the body and current evidence
 disagree, the plan goes with current evidence (and explicitly notes
-what changed and why).
+what changed and why). When the body's research and your fresh
+analysis disagree on **architecture** specifically — not just file
+paths or method names — pause and surface the disagreement to the
+user before locking the plan; do not unilaterally override prior
+research.
 
 ## Step 3 — Announce + gate on confirmation
 
@@ -205,25 +234,57 @@ Don't push until the gate is green. If a listed test can't run in this
 environment (no GPU CI, etc.), mark ⏭ skipped with a clear reason and
 note that CI must catch it.
 
-## Step 7 — Pre-PR review gate (automatic)
+## Step 7 — Pre-PR review gate (advisory) + your independent verification
 
 **Do not ask the user "open PR? [y/n]".** Invoke the `pr-review-gate`
-skill with the branch's diff and the issue context; use its verdict to
-decide what happens next:
+skill (which spawns an Opus reviewer) with the branch's diff and the
+**full issue body**. The reviewer's job is to flag concerns; **your
+job is to verify each one and form the final judgment.**
 
-- **PASS** — proceed straight to Step 8 (push + open PR). Print one
-  line like "Review passed — opening PR."
-- **FIX** — apply the listed fixes on this branch, re-run the test
-  gate (Step 6), commit with message `review: address pr-review-gate
-  feedback`, and re-invoke `pr-review-gate`. Cap the loop at 3
-  iterations; on the 4th, treat as DISCUSS.
-- **DISCUSS** — surface the reviewer's rationale verbatim and ask the
-  user: "Want me to fix these or open the PR anyway?" Do not proceed
-  without an explicit answer.
+The reviewer's verdict (PASS / FIX / DISCUSS) is advisory, not
+binding. Treat its output as a checklist of things to double-check
+against the actual code:
 
-The gate is intentionally narrow — it only decides whether to open the
-PR. Merge decisions, follow-up filing, and broader discussion stay
-with the user at Step 9.
+1. **Read every flagged location** with the Read tool — confirm the
+   reviewer's claim is accurate, not a misread.
+2. **Decide on the merits** — real bug, false positive, stylistic
+   note, or genuine architectural call?
+3. **Cross-check against the issue body** — names / shapes that
+   match the user-authored body verbatim are not yours to change.
+4. **Take action with your own judgment** — if a real concern, fix
+   it; if a false positive, note why; if architectural, surface to
+   the user with your own framing.
+
+Even when the reviewer returns PASS, **independently spot-check the
+load-bearing claims** before opening the PR:
+
+- Issue-body fidelity: every Description / Exit-criteria / AI-Agent-
+  Notes item implemented?
+- Behavior preservation in non-trivial migrations (multi-stage lock
+  patterns, error paths, cleanup-on-failure)?
+- Test quality: do the new tests genuinely lock in behavior
+  (mentally revert the impl and check)?
+
+You should leave Step 7 with **complete understanding of the issue
+and the current code**, and **high confidence the body of work is
+correct**. If you don't have that confidence, dig further — read
+more files, run more greps, ask the user before proceeding.
+
+**Outcomes:**
+
+- All your independent checks clear → proceed to Step 8 (push +
+  open PR). Tell the user "Review complete, no concerns" + a brief
+  summary of what you verified.
+- You found genuine issues during verification → fix them, re-run
+  the test gate (Step 6), commit, and re-invoke `pr-review-gate`.
+  Cap loop at 3 iterations.
+- You found a genuine architectural call (the reviewer flagged
+  trade-off, you read the code and agree) → surface to the user
+  with your own framing: "I found X. My read is Y. Want me to do A
+  or B?" Do NOT proceed without an answer.
+
+The skill's PASS/FIX/DISCUSS labels are the reviewer's
+recommendation. Your independent verification is what gates the PR.
 
 ## Step 8 — Push + open PR
 
