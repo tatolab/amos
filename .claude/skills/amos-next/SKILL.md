@@ -164,6 +164,59 @@ paths or method names — pause and surface the disagreement to the
 user before locking the plan; do not unilaterally override prior
 research.
 
+### Layer of fix + pattern sweep (engine-model checks)
+
+Before locking the plan, answer two engine-model questions. These
+gate Step 3's recommendation — getting them wrong is the foot-gun
+that wastes a planning round.
+
+**Q1 — At what layer does the defect actually live?**
+
+If the diagnosis points at an engine primitive (RHI,
+`HostVulkanDevice`, `GpuContext`, runtime hooks, IPC surfaces,
+escalate ops, public ABI types) that *any* consumer of that
+primitive would hit — the fix MUST be at the engine layer, even
+when the symptom showed up in one example or processor.
+**CLAUDE.md "Engine-wide bugs get fixed at the engine layer"
+applies.** Do NOT propose an example-level or processor-level
+bandaid as the recommended path. If the issue body proposes a
+consumer-level fix for what is actually an engine-level bug,
+strike it through with a dated supersession note and replace
+the recommendation with the engine-level shape.
+
+If the diagnosis is genuinely consumer-specific (this one
+processor's logic, this one example's wiring), the fix stays at
+the consumer level — most issues are consumer-level, engine-level
+is the exception. But when it IS engine-level, lead with the
+engine fix unconditionally. Don't ask "(a) easier example fix or
+(b) right engine fix?" — pick (b). Bandaids only appear when
+there is an explicit scope-cutting reason (time pressure,
+unmerged dep), and even then the user gets the call.
+
+**Q2 — Are there other consumers of the same pattern the change
+would affect?**
+
+When the fix is engine-level (or establishes a new canonical
+pattern at any layer), **CLAUDE.md "No bad patterns left behind
+on engine changes"** applies: every existing consumer of the old
+pattern migrates in the same PR — Rust + Python + Deno code,
+examples, processors, tests, docs, learnings.
+
+Run a sweep agent (Opus, `subagent_type=general-purpose`,
+`model: "opus"`) to find ALL consumers of the old pattern. The
+full sweep goes in the plan's "Files in scope" — these are NOT
+out-of-scope edits; they are the natural radius of the engine
+change, and an explicit exception to "files outside scope: ask
+before editing." Future agents read existing code to learn
+patterns; if half the codebase still uses the old shape, the
+old shape survives forever in onboarding.
+
+If the sweep is large, surface the scope-bloat to the user before
+locking the plan — "the engine change implicates N consumer files;
+here they are; confirm scope?" — but the default is sweep-in-PR,
+not punt-to-follow-up. Don't surprise the user at PR time with a
+massive diff.
+
 ## Step 3 — Announce + gate on confirmation
 
 Compose a short announcement in English (not JSON). The plan you
@@ -181,9 +234,18 @@ fresh plan and call out the divergence). Example shape:
 - **Loaded workflows**: <files read, or "none">
 - **Branch**: `<branch-name>`
 - **Goal** (paraphrased from issue): <1–2 sentences>
+- **Layer of fix**: engine | runtime | consumer | docs-only
+  (per Step 2.5 Q1 — if engine-level, the fix is engine-level and
+  no consumer-level bandaid is on the table)
+- **Pattern sweep** (per Step 2.5 Q2):
+  - When engine-level / new canonical pattern: list every consumer
+    file the change implicates (examples, processors, tests, docs,
+    learnings). These are in scope.
+  - When consumer-only: "no sweep — fix is local to <component>"
 - **Refined plan** (after Step 2.5 staleness check):
   - Exit criteria: <fresh, current-state-aware deliverables>
-  - Files in scope: <from current code, not just issue body>
+  - Files in scope: <from current code, not just issue body —
+    includes the full sweep when applicable>
   - Test shape: <from issue + workflows, refined for current state>
 - **What changed vs. issue body**: <list of items struck out,
   references that have moved, or "no divergence">
@@ -209,7 +271,12 @@ from the conventional-commit family.
 - Scope: the **goal as refined in Step 3's plan**, not a literal
   reading of every checkbox in the issue body. If the body says
   "do X, Y, Z" and Step 2.5 found Y is already done, skip Y.
-- Note anything genuinely out of scope as a follow-up, don't touch.
+- Note anything genuinely out of scope as a follow-up, don't touch
+  — *but* if you discover another consumer of the old pattern that
+  the engine change implicates and the Step 2.5 sweep missed it,
+  sweep it in the same PR (CLAUDE.md "No bad patterns left behind
+  on engine changes"). Pattern-correctness sweeps are in-scope by
+  rule when the engine moves.
 - Honor `CLAUDE.md` + every loaded workflow file.
 - `cargo check` (or project equivalent) frequently.
 - Conventional commits. Never commit broken code.
@@ -367,8 +434,18 @@ PR is open — merge is the user's call.
 
 1. One branch per issue.
 2. Never merge to main.
-3. Never edit outside scope.
+3. Never edit outside scope — *except* when an engine change
+   establishes a new canonical pattern, in which case sweep every
+   consumer of the old pattern in the same PR (CLAUDE.md "No bad
+   patterns left behind on engine changes"). The sweep is in-scope
+   by rule, not by exception.
 4. Always announce + wait for confirmation.
 5. Always run the test gate before pushing.
 6. Every matching `.claude/workflows/<label>.md` is mandatory.
 7. Present data to the user in natural English, never raw JSON.
+8. Engine-layer defects get engine-layer fixes. When the Step 2.5
+   diagnosis points at an engine primitive (RHI, `GpuContext`,
+   runtime hooks, IPC surfaces, escalate ops), recommend the
+   engine fix unconditionally — no example-level bandaid as a
+   "minimal alternative" (CLAUDE.md "Engine-wide bugs get fixed
+   at the engine layer").
