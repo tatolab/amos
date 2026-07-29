@@ -93,6 +93,23 @@ read every matching file into context. Those specialty workflows carry
 mandatory rules for the kind of work (`ci`, `video-e2e`, `macos`,
 `polyglot`, `research`, etc.).
 
+**Read every comment, oldest to newest — do not skim.** An issue's
+thread is where the owner answers parked questions, corrects the body,
+narrows scope, and records decisions made after filing. A comment is
+not commentary on the work — it *is* the work's specification, and it
+is **newer than the body**.
+
+Both loaders surface the thread: `gh issue view` returns it as a
+structured `comments` array, and `amos show` appends it to the body
+under a `### Comments` heading. Either way it lands at the *end* of a
+long body — exactly where attention is thinnest.
+
+Before moving on, state in one line per comment what it changes about
+the plan (or "no effect on plan"). If a comment and the body conflict,
+the comment wins — it was written later, by someone who had already
+read the body. Carry that resolution into Step 3's announcement under
+"What changed vs. issue body".
+
 ## Step 2.5 — Verify against current state (staleness check)
 
 **Issues are goals, not specs.** The body — exit criteria, suggested
@@ -121,9 +138,16 @@ drift," not the other way around — only flip that default when the
 evidence is unambiguous (the file the body names is gone, the PR
 the body references closed and removed the cited code, etc.).
 
-Audit the issue body against current code and current issue state.
-For each load-bearing claim in the body, check:
+Audit the issue body against current code, the issue's comment
+thread, and current issue state. For each load-bearing claim in the
+body, check:
 
+- **Later comments haven't already superseded it.** A comment that
+  narrows scope, answers a parked question, corrects a file path, or
+  records a decision overrides the body on that point — it was
+  written later, with the body already in view. An unanswered
+  question parked in a comment is a blocker to surface in Step 3,
+  not something to decide yourself.
 - **Referenced files / code paths** still exist in the shape claimed.
   If the body says "edit X in module Y," confirm Y still exists and
   X is still where it says.
