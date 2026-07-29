@@ -301,6 +301,14 @@ from the conventional-commit family.
   sweep it in the same PR (CLAUDE.md "No bad patterns left behind
   on engine changes"). Pattern-correctness sweeps are in-scope by
   rule when the engine moves.
+- **"Note as a follow-up" means write it down, not file it.** Every
+  agent-initiated issue goes through the priority gate in
+  `amos-file` ("Priority gate — only P0 files without being
+  asked"). P0 — the focused milestone's design or functionality
+  does not land without it — files directly. Everything else is
+  surfaced with a recommended action and waits for the user. Carry
+  sub-P0 findings to Step 9 and present them as a batch; do not
+  interrupt the work per finding.
 - Honor `CLAUDE.md` + every loaded workflow file.
 - `cargo check` (or project equivalent) frequently.
 - **Commit at logical checkpoints** (one per logical step of the work
@@ -404,7 +412,7 @@ Gather the set from three sources, then dedup:
 
 If a commit mentions an issue without a close keyword (just `#N`), that's a
 reference, not a closing link — don't auto-close it. If you're unsure whether
-an issue should close with this PR, leave it out and file a follow-up; wrong
+an issue should close with this PR, leave it out and say so in Step 9; wrong
 auto-closes are annoying to reverse.
 
 ### Create the PR
@@ -427,7 +435,8 @@ Closes #<N3>
 <copied from issue Tests/validation, with results>
 
 ## Follow-ups
-<out-of-scope, or "None">
+<P0 issues filed (with numbers), plus any sub-P0 findings written up
+inline here awaiting the user's call. "None" if neither.>
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -453,11 +462,23 @@ English summary, not JSON:
 <summary>
 
 ### Follow-ups filed
-<list, or "None">
+<P0 only, with issue numbers and one line each on why it was P0.
+"None" if nothing met the bar.>
+
+### Findings awaiting your call
+<Sub-P0 findings, batched. One entry each:
+  - **<what / where>** — <real cost of leaving it: who hits it, how
+    often, under what conditions>. Recommend: <file / leave unfiled /
+    fix inline / not worth tracking>.
+Omit this section entirely when there are none — don't pad it.>
 
 ### Ready for review
 PR is open — merge is the user's call.
 ```
+
+If the "awaiting your call" section is non-empty, end your turn there.
+Do not file any of them until the user answers; a denial is final for
+that finding.
 
 ## Rules (non-negotiable)
 
@@ -478,3 +499,9 @@ PR is open — merge is the user's call.
    engine fix unconditionally — no example-level bandaid as a
    "minimal alternative" (CLAUDE.md "Engine-wide bugs get fixed
    at the engine layer").
+9. Only P0 gets filed without asking. A finding you discovered
+   yourself is filed only when the focused milestone's design or
+   functionality does not land without it. Everything else is
+   surfaced with a recommended action and waits for the user's
+   approval — see the priority gate in `amos-file`. Being a real
+   defect is not the bar.

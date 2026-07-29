@@ -19,6 +19,50 @@ in chat; amos executes atomically.
 Never skip the approval gate. Never execute a create on a draft the user hasn't
 seen in full.
 
+## Priority gate — only P0 files without being asked
+
+**This gate is the first thing you evaluate, before drafting anything.** It is
+the canonical policy for every skill in this repo that could open an issue —
+`amos-next`'s follow-ups, a review gate's findings, a sweep's siblings. Skills
+that file reference this section rather than restating it.
+
+Two ways a filing starts, and they are governed differently.
+
+**User-initiated** — the user said "file this", "open an issue for X", or
+confirmed a "want me to file that?" offer. That is an instruction. Priority does
+not gate it. Continue to Step 1.
+
+**Agent-initiated** — nobody asked. You found it while doing something else: a
+review flagged it, a test flaked, a pattern sweep surfaced a sibling defect, an
+out-of-scope item fell out of the work. This is where backlogs rot, so it is
+gated:
+
+**P0 — file it directly, then report that you did.** P0 means the focused
+milestone's stated design or functionality does not land without this. The test
+is not "is this a real defect." It is: *if this is never fixed, does the
+milestone still deliver what it says it delivers?* If no → P0 → file it.
+
+**P1 and below — do not file. Surface and stop.** Present it in chat (or in the
+PR body if a PR is being opened) as:
+
+- **What / where** — one line, with the file:line or symptom.
+- **Real cost of leaving it** — who hits it, how often, under what conditions.
+  Be concrete: "requires save-snapshot → upgrade package → reload, which nothing
+  in the tree does today" is the useful form. "It's technically wrong" is not.
+- **Recommended action** — one of: file it / leave it unfiled / fix inline now /
+  not worth tracking. Commit to one; do not present a menu without a pick.
+
+Then end your turn and let the user decide. Their approval makes it
+user-initiated — file it. Their denial ends it: do not re-raise the same finding
+on a later pass, and do not file it under a different framing.
+
+**A defect being real is not the bar.** "Technically correct, currently
+unreachable" is precisely the issue that costs more to carry in the backlog than
+to leave unfiled. When you cannot confidently tell P0 from P1, it is P1 — ask.
+
+Batch this: if one pass surfaces several sub-P0 findings, present them together
+as a short list with one recommendation each, rather than interrupting per item.
+
 ## Approval gates: ask in chat, do not call AskUserQuestion
 
 Every gate in this skill — disambiguation questions, milestone selection, type
@@ -402,3 +446,8 @@ Don't summarize the body back at the user — they already approved it.
   remote; pass `--dir <project-root>` so it picks the right one.
 - **Don't** create a local plan file. AI-specific notes belong in the issue
   body. The plan-file path is deprecated for new issues.
+- **Don't** file an agent-initiated finding that isn't P0. Run the priority
+  gate first — surface it with a recommendation and wait. Completeness is not a
+  reason to file; a 200-issue backlog makes the real work harder to find.
+- **Don't** launder a denied finding into a new issue by re-scoping or
+  re-titling it. A "no" is final for that finding.
