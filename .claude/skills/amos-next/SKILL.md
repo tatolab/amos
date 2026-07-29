@@ -303,7 +303,12 @@ from the conventional-commit family.
   rule when the engine moves.
 - Honor `CLAUDE.md` + every loaded workflow file.
 - `cargo check` (or project equivalent) frequently.
-- Conventional commits. Never commit broken code.
+- **Commit at logical checkpoints** (one per logical step of the work
+  — "all packages cleaned", "build tooling updated", "tests migrated"
+  — not per file, not per edit, not one big commit at the end).
+  Conventional-commit prefixes. Each commit must build and pass tests.
+  Pushing still waits for Step 6's green test gate; committing does
+  not need per-commit approval.
 
 ## Step 6 — Run the test gate
 
