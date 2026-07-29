@@ -123,6 +123,16 @@ install_skills() {
 
   for skill in "${skills[@]}"; do
     local dir="${SKILLS_DIR}/${skill}"
+
+    # Respect a dev symlink into a local checkout, the way npm/pip leave a
+    # linked package alone. `curl -o` writes THROUGH a symlink, so without
+    # this the install would overwrite the checkout's own source with
+    # whatever is on main — silently destroying uncommitted work.
+    if [ -L "$dir" ]; then
+      echo -e "  ${DIM}skipped ${skill} (dev-linked → $(readlink "$dir"))${RESET}"
+      continue
+    fi
+
     mkdir -p "$dir"
 
     # Fetch the skill's file listing recursively and download each blob.
